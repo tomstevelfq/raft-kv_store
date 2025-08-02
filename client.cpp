@@ -1,4 +1,4 @@
-#include"rpc.h"
+#include"rpc.hpp"
 #include<iostream>
 #include<arpa/inet.h>
 #include<unistd.h>
@@ -16,12 +16,13 @@ int main(){
         inet_pton(AF_INET,"127.0.0.1",&serv_addr.sin_addr);
         int conn=connect(sock,(struct sockaddr*)&serv_addr,sizeof(serv_addr));
         std::cout<<conn<<std::endl;
-        std::string req=make_request("add",7,5);
+        std::string req=make_request("repeat",12,"tom");
+        std::cout<<req<<std::endl;
         send(sock,req.c_str(),req.size(),0);
         int bytes=read(sock,buffer,1024);
         std::string resp(buffer,bytes);
-        int result = parse_response(resp);
-        std::cout<<"RPC Call result:"<<result<<std::endl;
+        //int result = parse_response(resp);
+        std::cout<<"RPC Call result:"<<resp<<std::endl;
         close(sock);
     }
     return 0;

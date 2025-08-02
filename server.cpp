@@ -1,4 +1,4 @@
-#include"rpc.h"
+#include"rpc.hpp"
 #include"ThreadPool.h"
 #include<iostream>
 #include<netinet/in.h>
@@ -8,6 +8,18 @@
 
 int add(int a,int b){
     return a+b;
+}
+
+std::string greeting(){
+    return "hello world";
+}
+
+std::string repeat(int num,std::string str){
+    std::string newstr;
+    for(int i=0;i<num;i++){
+        newstr+=str;
+    }
+    return newstr;
 }
 
 int main(){
@@ -37,17 +49,25 @@ int main(){
     //线程池
     ThreadPool pool(5);
 
+    //rpc注册
+    RPCServer rpcServer;
+    rpcServer.register_function("add",add);
+    rpcServer.register_function("greeting",greeting);
+    rpcServer.register_function("repeat",repeat);
+
     while(true){
         new_socket=accept(server_fd,(struct sockaddr*)&address,&addrlen);
-        auto task = [=]{
+        auto task = [=,&rpcServer]{
             char buffer[1024]={0};
             int bytes=read(new_socket,buffer,1024);
             std::string req(buffer,bytes);
-            auto j=json::parse(req);
-            int a=j["params"][0];
-            int b=j["params"][1];
-            int result=add(a,b);
-            std::string resp=make_response(result);
+            json j=json::parse(req);
+
+            auto ret=rpcServer.handle(j);
+
+            std::cout<<ret<<std::endl;
+
+            std::string resp=ret.dump();
             std::cout<<resp<<std::endl;
             send(new_socket,resp.c_str(),resp.size(),0);
             close(new_socket);

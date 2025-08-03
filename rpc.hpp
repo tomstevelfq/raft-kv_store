@@ -9,6 +9,7 @@
 #include<unistd.h>
 #include<sys/select.h>
 #include<type_traits>
+#include<atomic>
 using json=nlohmann::json;
 
 template<typename T>
@@ -117,7 +118,11 @@ class RPCServer{
         //线程池
         ThreadPool pool(5);
 
-        while(true){
+        struct timeval timeout;
+        timeout.tv_sec=3;
+        timeout.tv_usec=0;
+
+        while(!stop.load()){
             //清空文件描述符集合
             FD_ZERO(&readfds);
             FD_SET(server_fd,&readfds);
@@ -134,7 +139,11 @@ class RPCServer{
                 }
             }
 
-            int activity=select(max_sd+1,&readfds,nullptr,nullptr,nullptr);
+            int activity=select(max_sd+1,&readfds,nullptr,nullptr,&timeout);
+            if(activity==0){
+                continue;
+            }
+            
             if(activity<0){
                 std::cerr<<"select error!"<<std::endl;
                 continue;
@@ -179,9 +188,17 @@ class RPCServer{
         }
 
         close(server_fd);
+        for(auto sock_fd:client_sockets){
+            close(sock_fd);
+        }
+    }
+
+    void stopServer(){
+        stop=true;
     }
 
     private:
     std::unordered_map<std::string,Handler> handlers;
+    std::atomic<bool> stop=false;
 };
 

@@ -8,6 +8,7 @@
 #include<thread>
 #include<unordered_map>
 #include<chrono>
+#include<csignal>
 
 using namespace std::chrono;
 
@@ -24,7 +25,7 @@ struct WorkerInfo{
     bool alive=true;  //是否存活
 };
 
-struct Coordinator{
+class Coordinator{
     private:
     int nReduce;
     std::vector<std::pair<std::string,std::string>> inputs;
@@ -37,6 +38,7 @@ struct Coordinator{
     std::unordered_map<int,WorkerInfo> workers;
     std::mutex mu;
     RPCServer rpcServer;
+    std::thread rpcLoop,mLoop;
     const int PORT=9099;
 
     public:
@@ -80,12 +82,14 @@ struct Coordinator{
 
     void handleLoop(){
         rpcRegister();//注册rpc
-        rpcServer.startRpcLoop(PORT);//开启循环
+        rpcLoop=std::thread([this]{this->rpcServer.startRpcLoop(PORT);});//开启循环
+        mLoop=std::thread([this]{this->monitorLoop();});
+        handle_sigint();
     }
 
     void monitorLoop(){
         while(!stop.load()){
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             std::vector<int> justDead;
             {
                 std::lock_guard<std::mutex> lk(mu);
@@ -102,6 +106,38 @@ struct Coordinator{
             for(int id:justDead){
                 std::cout<<"coordinator worker#"<<id<<" heartbeat timeout"<<std::endl;
                 //节点失效，重新分配任务
+            }
+        }
+    }
+
+    void stopCoordinator(){
+        rpcServer.stopServer();
+        stop=true;
+        rpcLoop.join();
+        mLoop.join();
+    }
+
+    //信号触发退出回收套接字
+    void handle_sigint(){
+        int signo;
+        sigset_t mask;
+        sigemptyset(&mask);
+        sigaddset(&mask,SIGTSTP);
+        sigaddset(&mask,SIGQUIT);
+
+        if(pthread_sigmask(SIG_BLOCK,&mask,nullptr)!=0){
+            perror("error setting signal mask");
+            return;
+        }
+
+        while(!stop.load()){
+            if(sigwait(&mask,&signo)!=0){
+                perror("error in sigwait");
+            }
+            std::cout<<"signal coming"<<std::endl;
+            if(signo==SIGTSTP||signo==SIGQUIT){
+                std::cout<<"signal shutdown"<<std::endl;
+                stopCoordinator();
             }
         }
     }

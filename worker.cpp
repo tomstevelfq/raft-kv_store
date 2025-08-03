@@ -10,6 +10,7 @@
 #include<arpa/inet.h>
 #include<unistd.h>
 #include<cstring>
+#include<csignal>
 
 using namespace std::chrono;
 
@@ -39,7 +40,10 @@ public:
         R=result.second;
 
         hbThread=std::thread(&Worker::heartbeatLoop,this);//启动心跳线程
-        hbThread.join();
+        handle_sigint();
+        if(hbThread.joinable()){
+            hbThread.join();
+        }
     }
 
     void setStatus(const std::string& s,int runningTask=-1){
@@ -63,7 +67,32 @@ public:
         if(hbThread.joinable()){
             hbThread.join();
         }
+        close(serverSock);
         std::cout<<"worker#"<<id<<" shutdown\n";
+    }
+
+    void handle_sigint(){
+        int signo;
+        sigset_t mask;
+        sigemptyset(&mask);
+        sigaddset(&mask,SIGTSTP);
+        sigaddset(&mask,SIGQUIT);
+
+        if(pthread_sigmask(SIG_BLOCK,&mask,nullptr)!=0){
+            perror("error setting signal mask");
+            return;
+        }
+
+        while(!stop.load()){
+            if(sigwait(&mask,&signo)!=0){
+                perror("error in sigwait");
+            }
+            std::cout<<"signal coming"<<std::endl;
+            if(signo==SIGTSTP||signo==SIGQUIT){
+                std::cout<<"signal shutdown"<<std::endl;
+                shutdown();
+            }
+        }
     }
 
 
@@ -111,7 +140,7 @@ private:
 };
 
 int main(){
-    Worker worker("127.0.0.1",10000);
+    Worker worker("127.0.0.1",1000);
     worker.start();
     return 0;
 }

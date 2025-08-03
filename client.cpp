@@ -5,7 +5,7 @@
 #include<cstring>
 
 int main(){
-    for(int i=0;i<1000;i++){
+    for(int i=0;i<10;i++){
         int sock=0;
         sockaddr_in serv_addr;
         char buffer[1024]={0};
@@ -16,7 +16,7 @@ int main(){
         inet_pton(AF_INET,"127.0.0.1",&serv_addr.sin_addr);
         int conn=connect(sock,(struct sockaddr*)&serv_addr,sizeof(serv_addr));
         std::cout<<conn<<std::endl;
-        std::string req=make_request("repeat",12,"tom");
+        std::string req=make_request("hello","tom");
         std::cout<<req<<std::endl;
         send(sock,req.c_str(),req.size(),0);
         int bytes=read(sock,buffer,1024);

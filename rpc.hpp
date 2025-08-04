@@ -177,7 +177,7 @@ class RPCServer{
                         auto fn=[=]{
                             json j=json::parse(req);
                             auto ret=handle(j);
-                            std::cout<<"response: "<<ret<<std::endl;
+                            std::cout<<"response: "<<ret<<"method: "<<req<<std::endl;
                             std::string resp=ret.dump();
                             send(client_socket,resp.c_str(),resp.size(),0);
                         };

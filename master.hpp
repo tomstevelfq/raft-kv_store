@@ -1,5 +1,6 @@
 #pragma once
 #include"rpc.hpp"
+#include"common.h"
 #include<iostream>
 #include<map>
 #include<vector>
@@ -23,10 +24,12 @@ struct WorkerInfo{
     std::string status="Idle";
     int runningTask=-1;
     bool alive=true;  //是否存活
+    std::vector<Task> tasks;
+    std::mutex tsk_mtx; //tasks锁
 };
 
 class Coordinator{
-    private:
+private:
     int nReduce;
     std::vector<std::pair<std::string,std::string>> inputs;
     MapFn mapfn;
@@ -37,23 +40,21 @@ class Coordinator{
     std::atomic<bool> stop;
     std::unordered_map<int,WorkerInfo> workers;
     std::mutex mu;
+    std::mutex task_mtx;
     RPCServer rpcServer;
     std::thread rpcLoop,mLoop;
     const int PORT=9099;
-
-    public:
-    explicit Coordinator(int R,int timeoutMs):R(R),timeoutMs(timeoutMs),nextId(1),stop(false){}
+    std::vector<Task> tasks;
 
     std::pair<int,int> registerWorker(std::string addr){
         std::lock_guard<std::mutex> lk(mu);
         int id=nextId++;
-        WorkerInfo wi;
+        WorkerInfo &wi=workers[id];
         wi.id=id;
         wi.addr=addr;
         wi.lastHB=steady_clock::now();
         wi.status="Register";
         wi.alive=true;
-        workers[id]=wi;
         std::cout<<"Coordinator worker#"<<id<<" registered from "<<addr<<"(R=)"<<R<<std::endl;
         return {id,R};
     }
@@ -78,6 +79,42 @@ class Coordinator{
     void rpcRegister(){
         rpcServer.register_function("registerWorker",this,&Coordinator::registerWorker);
         rpcServer.register_function("heartbeat",this,&Coordinator::heartbeat);
+        rpcServer.register_function("assignTask",this,&Coordinator::asignTask);
+        rpcServer.register_function("finishTask",this,&Coordinator::finishTask);
+    }
+
+    //分发任务
+    Task asignTask(int workerId){
+        std::lock_guard<std::mutex> lock(task_mtx);
+        if(!tasks.empty()){
+            auto task=tasks.begin();
+            Task assignedTask=*task;
+            tasks.erase(task);
+            {
+                std::lock_guard<std::mutex> lck(workers[workerId].tsk_mtx);
+                workers[workerId].tasks.push_back(assignedTask);   //添加到worker的待完成任务队列中
+            }
+            return assignedTask;
+        }else{
+            return {-1,""};
+        }
+    }
+
+    int finishTask(int workerId,int taskId){
+        std::lock_guard<std::mutex> lck(workers[workerId].tsk_mtx);
+        auto& tasks=workers[workerId].tasks;
+        for(auto it=tasks.begin();it!=tasks.end();it++){
+            if(it->first==taskId){
+                workers[workerId].tasks.erase(it);
+                break;
+            }
+        }
+        return 0;
+    }
+
+public:
+    explicit Coordinator(int R,int timeoutMs):R(R),timeoutMs(timeoutMs),nextId(1),stop(false){
+        tasks={{0,"file1.txt"},{1,"file2.txt"},{2,"file3.txt"}};//初始化任务列表
     }
 
     void handleLoop(){
@@ -233,25 +270,3 @@ std::string WordCountReduce(const std::string& key,const std::vector<std::string
     }
     return std::to_string(s);
 }
-
-// int main(){
-//     std::vector<std::pair<std::string,std::string>> inputs={
-//         {"a.txt","hello world hello"},
-//         {"b.txt","map reduce map mapreduce"},
-//         {"c.txt","World of distributed map reduce HELLO"}
-//     };
-
-//     Coordinator coord{
-//         3,
-//         inputs,
-//         WordCountMap,
-//         WordCountReduce
-//     };
-
-//     auto result=coord.run();
-//     std::cout<<"===final word count====\n";
-//     for(auto& kv:result){
-//         std::cout<<kv.first<<":"<<kv.second<<std::endl;
-//     }
-//     return 0;
-// }

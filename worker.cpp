@@ -1,4 +1,5 @@
 #include"master.hpp"
+#include"common.h"
 #include<iostream>
 #include<unordered_map>
 #include<thread>
@@ -20,12 +21,17 @@ public:
     :addr(addr),hbIntervalMs(hbIntervalMs),stop(false),id(0),R(0){}
 
     template<typename... Args>
-    json request(const std::string& name,Args... args){
+    json request(int sock,const std::string& name,Args... args){
         char buffer[1024]={0};
         std::string req=make_request(name,args...);
         std::cout<<"req:"<<req<<std::endl;
-        send(serverSock,req.c_str(),req.size(),0);
-        int bytes=read(serverSock,buffer,1024);
+        send(sock,req.c_str(),req.size(),0);
+        int bytes=read(sock,buffer,1024);
+        if(bytes<=0){
+            json j;
+            j["result"]=-1;
+            return j;
+        }
         std::string resp(buffer,bytes);
         json j=json::parse(resp);
         return j;
@@ -33,16 +39,20 @@ public:
 
     void start(){
         serverSock=connectCoord("127.0.0.1",9099);
-        json j=request("registerWorker","localhost");//向maser注册
+        json j=request(serverSock,"registerWorker","localhost");//向maser注册
         std::cout<<"result:"<<j["result"]<<std::endl;
         auto result=j["result"].get<std::pair<int,int>>();
         id=result.first;
         R=result.second;
 
         hbThread=std::thread(&Worker::heartbeatLoop,this);//启动心跳线程
+        taskThread=std::thread(&Worker::taskLoop,this);//启动工作线程
         handle_sigint();
         if(hbThread.joinable()){
             hbThread.join();
+        }
+        if(taskThread.joinable()){
+            taskThread.join();
         }
     }
 
@@ -55,9 +65,6 @@ public:
     //模拟崩溃
     void simulateCrash(){
         stop.store(true);
-        if(hbThread.joinable()){
-            hbThread.join();
-        }
         std::cout<<"worker#"<<id<<" crashed (stop heartbeats)\n";
     }
 
@@ -66,6 +73,9 @@ public:
         stop.store(true);
         if(hbThread.joinable()){
             hbThread.join();
+        }
+        if(taskThread.joinable()){
+            taskThread.join();
         }
         close(serverSock);
         std::cout<<"worker#"<<id<<" shutdown\n";
@@ -101,21 +111,44 @@ private:
     int hbIntervalMs;
     std::atomic<bool> stop;
     std::thread hbThread;//心跳线程
+    std::thread taskThread;//任务线程
     int id;
     int R;
     std::mutex mu;
     std::string status="Idle";
     int runningTask=-1;
     int serverSock;
+    int taskSock;
 
     void heartbeatLoop(){
         while(!stop.load()){
             {
-                std::lock_guard<std::mutex> lk(mu);
-                json j=request("heartbeat",id,status,runningTask);
+                //std::lock_guard<std::mutex> lk(mu);
+                json j=request(serverSock,"heartbeat",id,status,runningTask);
                 bool ok=j["result"];
                 if(!ok){
                     std::cout<<"worker#"<<id<<" heartbeat rejected (not registered?)\n";
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(hbIntervalMs));
+        }
+    }
+
+    void taskLoop(){
+        taskSock=connectCoord("127.0.0.1",9099);
+        while(!stop.load()){
+            json j=request(taskSock,"assignTask",id);
+            Task task=j["result"].get<Task>();
+            if(task.first!=-1){
+                std::cout<<"solving task "<<task.first<<" "<<task.second<<std::endl;
+                while(true){
+                    j=request(taskSock,"finishTask",id,task.first);//上报完成
+                    if(j["result"]!=-1){
+                        std::cout<<"finish success"<<std::endl;
+                        break;
+                    }
+                    std::cout<<"finish error"<<std::endl;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(hbIntervalMs));
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(hbIntervalMs));

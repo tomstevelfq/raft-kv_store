@@ -42,7 +42,7 @@ int partition(const std::string& key,int R){
 }
 
 void writePartitionToFile(int mapID,int reduceID,const std::vector<std::pair<std::string,int>>& kvs,std::vector<std::pair<int,std::string>>& files){
-    std::string filename = "mr-"+std::to_string(mapID)+"-"+std::to_string(reduceID);
+    std::string filename = "./reduce/mr-" +std::to_string(mapID)+"-"+std::to_string(reduceID);
     files.push_back({reduceID,filename});
     std::ofstream outfile(filename,std::ios::out|std::ios::app);
     for(const auto& kv:kvs){

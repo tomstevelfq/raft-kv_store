@@ -27,5 +27,6 @@ worker: worker.o
 clean:
 	rm -f *.o $(TARGETS)
 	rm -rf *.dSYM
+	rm -rf ./reduce/*
 
 .PHONY: all clean

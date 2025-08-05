@@ -173,6 +173,7 @@ private:
                 if(task.first==-1){
                     std::cout<<"no reduce task"<<std::endl;
                     std::this_thread::sleep_for(std::chrono::milliseconds(hbIntervalMs));
+                    continue;
                 }
                 std::cout<<"reduceId: "<<task.first<<std::endl;
                 for(auto& it:task.second){

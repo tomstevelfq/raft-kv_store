@@ -131,6 +131,7 @@ private:
             for(auto& it:it->second){
                 rt.second.push_back(it.filepath);
             }
+            reduceMapFiles.erase(it);
             return rt;
         }
         return {-1,{}};

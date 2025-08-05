@@ -167,59 +167,72 @@ private:
     void taskLoop(){
         taskSock=connectCoord("127.0.0.1",9099);
         while(!stop.load()){
-            if(isReduce.load()){
-                json j=request(taskSock,"assignReduceTask",id);
-                ReduceTask task=j["result"].get<ReduceTask>();
-                if(task.first==-1){
+            json j=request(taskSock,"assignReduceTask",id);
+            Task task=j["result"].get<Task>();
+            if(task.type==REDUCE){ //是reduce任务
+                if(task.id==-1){
                     std::cout<<"no reduce task"<<std::endl;
                     std::this_thread::sleep_for(std::chrono::milliseconds(hbIntervalMs));
                     continue;
                 }
-                std::cout<<"reduceId: "<<task.first<<std::endl;
-                for(auto& it:task.second){
+                std::cout<<"reduceId: "<<task.id<<std::endl;
+                for(auto& it:task.files){
                     std::cout<<"filepath: "<<it<<std::endl;
                 }
-            }else{
-                json j=request(taskSock,"assignTask",id);
-                Task task=j["result"].get<Task>();
-                if(task.first==REDUCE_FLAG){
-                    //进入reduce阶段
-                    isReduce=true;
-                }else if(task.first!=-1){
-                    std::cout<<"solving task "<<task.first<<" "<<task.second<<std::endl;
-                    task.second=readFile(task.second);
-                    std::vector<std::pair<int,std::string>> files;
-                    processMapAndWrite(task.first,task.second,R,files);
-                    for(auto file:files){
-                        j=request(taskSock,"processReport","127.0.0.1",9099,id,task.first,file.first,file.second);//上报分片文件路径
-                        std::cout<<"process report:"<<file.second<<std::endl;
+
+                auto& files = task.files;
+                std::vector<KeyValue> keyvals;
+                std::string key, val;
+                for (uint i = 0; i < files.size(); i++) {
+                    std::ifstream ifs(files[i]);
+                    while (ifs >> key >> val) {
+                        keyvals.push_back({ key, val });
                     }
-                    while(true){
-                        j=request(taskSock,"finishTask",id,task.first);//上报完成
-                        if(j["result"]!=-1){
-                            std::cout<<"finish success"<<std::endl;
-                            break;
+                }
+
+                std::sort(keyvals.begin(),keyvals.end());
+
+                std::string preKey = keyvals[0].first;
+                std::vector<std::string> vals;
+                std::vector<KeyValue> ans;
+                for (uint i = 0; i < keyvals.size(); i++) {
+                    if (preKey != keyvals[i].first) {
+                        std::vector<std::string> rs = Reduce(preKey, vals);
+                        if (!rs.empty()) {
+                            ans.push_back({ preKey, rs[0] });
                         }
-                        std::cout<<"finish error"<<std::endl;
-                        std::this_thread::sleep_for(std::chrono::milliseconds(hbIntervalMs));
+                        vals.clear();
+                        preKey = keyvals[i].first;
+                        vals.push_back(keyvals[i].second);
+                    } else {
+                        vals.push_back(keyvals[i].second);
                     }
+                }
+                std::vector<std::string> rs = Reduce(preKey, vals);
+                if (!rs.empty()) {
+                    ans.push_back({ preKey, rs[0] });
+                }
+                std::string filepath=writeReduceAnsToFile(task.id,ans);
+
+                j=request(taskSock,"reduceReport","127.0.0.1",9099,id,task.id,filepath);//上报reduce任务完成
+                std::cout<<"reduce report:"<<id<<"--"<<task.id<<std::endl;
+            }else{ //是map任务
+                if(task.id!=-1){
+                    std::cout<<"solving task "<<task.id<<" "<<task.files[0]<<std::endl;
+                    task.files[0]=readFile(task.files[0]);
+                    std::vector<std::string> files(R);
+                    processMapAndWrite(task.id,task.files[0],R,files);
+                    j=request(taskSock,"mapReport","127.0.0.1",9099,id,task.id,files);//上报map任务完成
+                    std::cout<<"map report:"<<id<<"--"<<task.id<<std::endl;
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(hbIntervalMs));
         }
     }
 
-    void writeToDisk(std::vector<MapKV> mkv){
-        std::unordered_map<int,std::string> reduceContent;
-        for(auto& it:mkv){
-        
-        }
-    }
-
     int connectCoord(const std::string& ip,const int port){
         int sock=0;
         sockaddr_in serv_addr;
-        char buffer[1024]={0};
         sock=socket(AF_INET,SOCK_STREAM,0);
         serv_addr.sin_family=AF_INET;
         serv_addr.sin_port=htons(9099);

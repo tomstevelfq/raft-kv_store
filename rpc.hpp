@@ -108,7 +108,7 @@ class RPCServer{
             std::cout<<"bind error"<<std::endl;
             exit(1);
         }
-        int l=listen(server_fd,3);
+        listen(server_fd,3);
         std::cout<<"server listen on 9099 ..."<<std::endl;
         socklen_t addrlen=sizeof(address);
 

@@ -1,0 +1,4 @@
+data, specifically
+tailored to the capabilities of LLMs. ToolACE leverages a novel self-evolution
+synthesis process to curate a comprehensive API pool of 26,507 diverse APIs.
+Dialogs are further generated through the interplay among multiple agents, under

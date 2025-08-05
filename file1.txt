@@ -1,0 +1,2 @@
+Function calling significantly extends the application boundary of large language
+models (LLMs), where high-quality and diverse training data is critical for unlocking this capability. However, collecting and annotating real function-calling data

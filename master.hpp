@@ -13,10 +13,6 @@
 
 using namespace std::chrono;
 
-using MapKV=std::pair<std::string,std::string>;
-using MapFn=std::function<std::vector<MapKV>(const std::string&,const std::string&)>;
-using ReduceFn=std::function<std::string(const std::string&,const std::vector<std::string>&)>;
-
 struct WorkerInfo{
     int id=0;
     std::string addr;
@@ -26,6 +22,16 @@ struct WorkerInfo{
     bool alive=true;  //是否存活
     std::vector<Task> tasks;
     std::mutex tsk_mtx; //tasks锁
+};
+
+struct MapFile{
+    int mapID;
+    int reduceID;
+    int workerID;
+    std::string addr;
+    std::string key;
+    int port;
+    std::string filepath;
 };
 
 class Coordinator{
@@ -39,12 +45,20 @@ private:
     std::atomic<int> nextId;
     std::atomic<bool> stop;
     std::unordered_map<int,WorkerInfo> workers;
+    std::unordered_map<int,std::vector<MapFile>> reduceMapFiles;  //每个reduce用的MapFile列表
+    std::unordered_map<int,std::vector<int>> workerReduceMap; //每个worker负责哪些reduceId
+    std::mutex reduceMapMtx;
     std::mutex mu;
     std::mutex task_mtx;
     RPCServer rpcServer;
     std::thread rpcLoop,mLoop;
     const int PORT=9099;
     std::vector<Task> tasks;
+    std::vector<MapFile> mapFiles;
+    std::mutex mfMtx;
+    std::atomic<int> mapCompleteCount;
+    int totalMapTasks;
+    std::atomic<bool> isReduce;
 
     std::pair<int,int> registerWorker(std::string addr){
         std::lock_guard<std::mutex> lk(mu);
@@ -81,23 +95,53 @@ private:
         rpcServer.register_function("heartbeat",this,&Coordinator::heartbeat);
         rpcServer.register_function("assignTask",this,&Coordinator::asignTask);
         rpcServer.register_function("finishTask",this,&Coordinator::finishTask);
+        rpcServer.register_function("assignReduceTask",this,&Coordinator::assignReduceTask);
+        rpcServer.register_function("processReport",this,&Coordinator::processReport);
     }
 
     //分发任务
     Task asignTask(int workerId){
-        std::lock_guard<std::mutex> lock(task_mtx);
-        if(!tasks.empty()){
-            auto task=tasks.begin();
-            Task assignedTask=*task;
-            tasks.erase(task);
-            {
-                std::lock_guard<std::mutex> lck(workers[workerId].tsk_mtx);
-                workers[workerId].tasks.push_back(assignedTask);   //添加到worker的待完成任务队列中
+        if(!isReduce.load()){
+            std::lock_guard<std::mutex> lock(task_mtx);
+            if(!tasks.empty()){
+                auto task=tasks.begin();
+                Task assignedTask=*task;
+                tasks.erase(task);
+                {
+                    std::lock_guard<std::mutex> lck(workers[workerId].tsk_mtx);
+                    workers[workerId].tasks.push_back(assignedTask);   //添加到worker的待完成任务队列中
+                }
+                return assignedTask;
+            }else{
+                return {-1,""};
             }
-            return assignedTask;
         }else{
-            return {-1,""};
+            //进入reduce阶段后分配reduce任务
+            return {REDUCE_FLAG,""};
         }
+    }
+
+    ReduceTask assignReduceTask(int workerId){
+        std::lock_guard<std::mutex> lock(reduceMapMtx);
+        if(!reduceMapFiles.empty()){
+            auto it=reduceMapFiles.begin();
+            workerReduceMap[workerId].push_back(it->first);
+            ReduceTask rt;
+            rt.first=it->first;
+            for(auto& it:it->second){
+                rt.second.push_back(it.filepath);
+            }
+            return rt;
+        }
+        return {-1,{}};
+    }
+
+    void shuffle(){
+        
+    }
+
+    void shuffleAndSort(){
+
     }
 
     int finishTask(int workerId,int taskId){
@@ -106,15 +150,41 @@ private:
         for(auto it=tasks.begin();it!=tasks.end();it++){
             if(it->first==taskId){
                 workers[workerId].tasks.erase(it);
+                mapCompleteCount++;
                 break;
             }
+        }
+        if(mapCompleteCount==totalMapTasks){
+            startReduce(); //开启reduce阶段
         }
         return 0;
     }
 
+    int processReport(const std::string addr,int port,int workerID,int mapID,int reduceID,const std::string filepath){
+        MapFile mf;
+        mf.addr=addr;
+        mf.port=port;
+        mf.workerID=workerID;
+        mf.mapID=mapID;
+        mf.filepath=filepath;
+        mf.reduceID=reduceID;
+        std::lock_guard<std::mutex> lck(mfMtx);
+        mapFiles.push_back(mf);
+        reduceMapFiles[reduceID].push_back(mf);
+        return 0;
+    }
+
 public:
-    explicit Coordinator(int R,int timeoutMs):R(R),timeoutMs(timeoutMs),nextId(1),stop(false){
+    explicit Coordinator(int R,int timeoutMs):R(R),timeoutMs(timeoutMs),nextId(1),stop(false),mapCompleteCount(0),
+    isReduce(false){
         tasks={{0,"file1.txt"},{1,"file2.txt"},{2,"file3.txt"}};//初始化任务列表
+        totalMapTasks=tasks.size();
+    }
+
+    //开启reduce阶段
+    void startReduce(){
+        //通知各个woker节点进入reduce阶段
+        isReduce=true;
     }
 
     void handleLoop(){
@@ -241,32 +311,3 @@ public:
         return finalOut;
     }
 };
-
-std::vector<MapKV> WordCountMap(const std::string& filename,const std::string& content){
-    std::vector<MapKV> out;
-    std::string w;
-    out.reserve(content.size()/4+1);
-    auto flush=[&]{
-        if(!w.empty()){
-            out.emplace_back(w,"1");
-            w.clear();
-        }
-    };
-    for(unsigned char ch:content){
-        if(isalpha(ch)){
-            w.push_back((char)tolower(ch));
-        }else{
-            flush();
-        }
-    }
-    flush();
-    return out;
-}
-
-std::string WordCountReduce(const std::string& key,const std::vector<std::string>& values){
-    long long s=0;
-    for(auto &v:values){
-        s+=(v=="1")?1:stoll(v);
-    }
-    return std::to_string(s);
-}

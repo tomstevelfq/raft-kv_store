@@ -1,0 +1,2 @@
+is challenging, while synthetic data from existing pipelines often lack coverage
+and accuracy. In this paper, we present ToolACE, an automatic agentic pipeline

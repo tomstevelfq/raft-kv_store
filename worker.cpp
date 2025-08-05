@@ -15,6 +15,35 @@
 
 using namespace std::chrono;
 
+std::vector<MapKV> WordCountMap(const std::string& filename,const std::string& content){
+    std::vector<MapKV> out;
+    std::string w;
+    out.reserve(content.size()/4+1);
+    auto flush=[&]{
+        if(!w.empty()){
+            out.emplace_back(w,"1");
+            w.clear();
+        }
+    };
+    for(unsigned char ch:content){
+        if(isalpha(ch)){
+            w.push_back((char)tolower(ch));
+        }else{
+            flush();
+        }
+    }
+    flush();
+    return out;
+}
+
+std::string WordCountReduce(const std::string& key,const std::vector<std::string>& values){
+    long long s=0;
+    for(auto &v:values){
+        s+=(v=="1")?1:stoll(v);
+    }
+    return std::to_string(s);
+}
+
 class Worker{
 public:
     Worker(std::string addr,int hbIntervalMs)
@@ -119,6 +148,7 @@ private:
     int runningTask=-1;
     int serverSock;
     int taskSock;
+    std::atomic<bool> isReduce=false;
 
     void heartbeatLoop(){
         while(!stop.load()){
@@ -137,21 +167,51 @@ private:
     void taskLoop(){
         taskSock=connectCoord("127.0.0.1",9099);
         while(!stop.load()){
-            json j=request(taskSock,"assignTask",id);
-            Task task=j["result"].get<Task>();
-            if(task.first!=-1){
-                std::cout<<"solving task "<<task.first<<" "<<task.second<<std::endl;
-                while(true){
-                    j=request(taskSock,"finishTask",id,task.first);//上报完成
-                    if(j["result"]!=-1){
-                        std::cout<<"finish success"<<std::endl;
-                        break;
-                    }
-                    std::cout<<"finish error"<<std::endl;
+            if(isReduce.load()){
+                json j=request(taskSock,"assignReduceTask",id);
+                ReduceTask task=j["result"].get<ReduceTask>();
+                if(task.first==-1){
+                    std::cout<<"no reduce task"<<std::endl;
                     std::this_thread::sleep_for(std::chrono::milliseconds(hbIntervalMs));
+                }
+                std::cout<<"reduceId: "<<task.first<<std::endl;
+                for(auto& it:task.second){
+                    std::cout<<"filepath: "<<it<<std::endl;
+                }
+            }else{
+                json j=request(taskSock,"assignTask",id);
+                Task task=j["result"].get<Task>();
+                if(task.first==REDUCE_FLAG){
+                    //进入reduce阶段
+                    isReduce=true;
+                }else if(task.first!=-1){
+                    std::cout<<"solving task "<<task.first<<" "<<task.second<<std::endl;
+                    task.second=readFile(task.second);
+                    std::vector<std::pair<int,std::string>> files;
+                    processMapAndWrite(task.first,task.second,R,files);
+                    for(auto file:files){
+                        j=request(taskSock,"processReport","127.0.0.1",9099,id,task.first,file.first,file.second);//上报分片文件路径
+                        std::cout<<"process report:"<<file.second<<std::endl;
+                    }
+                    while(true){
+                        j=request(taskSock,"finishTask",id,task.first);//上报完成
+                        if(j["result"]!=-1){
+                            std::cout<<"finish success"<<std::endl;
+                            break;
+                        }
+                        std::cout<<"finish error"<<std::endl;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(hbIntervalMs));
+                    }
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(hbIntervalMs));
+        }
+    }
+
+    void writeToDisk(std::vector<MapKV> mkv){
+        std::unordered_map<int,std::string> reduceContent;
+        for(auto& it:mkv){
+        
         }
     }
 

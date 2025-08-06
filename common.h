@@ -69,7 +69,11 @@ std::vector<std::pair<std::string, int>> Map(const std::string& text) {
 }
 
 std::vector<std::string> Reduce(const std::string& key,const std::vector<std::string> vals){
-    return {std::to_string(vals.size())};
+    int num=0;
+    for(auto& it:vals){
+        num+=atoi(it.c_str());
+    }
+    return {std::to_string(num)};
 }
 
 int partition(const std::string& key,int R){
@@ -112,6 +116,66 @@ void processMapAndWrite(int mapID,const std::string& text,int R,std::vector<std:
             writePartitionToFile(mapID,i,partitions[i],files);
         }
     }
+}
+
+template<typename... Args>
+json request(int sock,const std::string& name,Args... args){
+    char buffer[1024]={0};
+    std::string req=make_request(name,args...);
+    std::cout<<"req:"<<req<<std::endl;
+    send(sock,req.c_str(),req.size(),0);
+    int bytes=read(sock,buffer,1024);
+    if(bytes<=0){
+        json j;
+        j["result"]=-1;
+        return j;
+    }
+    std::string resp(buffer,bytes);
+    json j=json::parse(resp);
+    return j;
+}
+
+//reduce执行与写入
+std::string processReduceAndWrite(Task& task,int workerId,int taskSock){
+    std::cout<<"reduceId: "<<task.id<<std::endl;
+    for(auto& it:task.files){
+        std::cout<<"filepath: "<<it<<std::endl;
+    }
+
+    auto& files = task.files;
+    std::vector<KeyValue> keyvals;
+    std::string key, val;
+    for (uint i = 0; i < files.size(); i++) {
+        std::ifstream ifs(files[i]);
+        while (ifs >> key >> val) {
+            keyvals.push_back({ key, val });
+        }
+    }
+
+    std::sort(keyvals.begin(),keyvals.end());
+
+    std::string preKey = keyvals[0].first;
+    std::vector<std::string> vals;
+    std::vector<KeyValue> ans;
+    for (uint i = 0; i < keyvals.size(); i++) {
+        if (preKey != keyvals[i].first) {
+            std::vector<std::string> rs = Reduce(preKey, vals);
+            if (!rs.empty()) {
+                ans.push_back({ preKey, rs[0] });
+            }
+            vals.clear();
+            preKey = keyvals[i].first;
+            vals.push_back(keyvals[i].second);
+        } else {
+            vals.push_back(keyvals[i].second);
+        }
+    }
+    std::vector<std::string> rs = Reduce(preKey, vals);
+    if (!rs.empty()) {
+        ans.push_back({ preKey, rs[0] });
+    }
+    std::string filepath=writeReduceAnsToFile(task.id,ans);
+    return filepath;
 }
 
 //文件读取函数

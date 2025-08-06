@@ -49,23 +49,6 @@ public:
     Worker(std::string addr,int hbIntervalMs)
     :addr(addr),hbIntervalMs(hbIntervalMs),stop(false),id(0),R(0){}
 
-    template<typename... Args>
-    json request(int sock,const std::string& name,Args... args){
-        char buffer[1024]={0};
-        std::string req=make_request(name,args...);
-        std::cout<<"req:"<<req<<std::endl;
-        send(sock,req.c_str(),req.size(),0);
-        int bytes=read(sock,buffer,1024);
-        if(bytes<=0){
-            json j;
-            j["result"]=-1;
-            return j;
-        }
-        std::string resp(buffer,bytes);
-        json j=json::parse(resp);
-        return j;
-    }
-
     void start(){
         serverSock=connectCoord("127.0.0.1",9099);
         json j=request(serverSock,"registerWorker","localhost");//向maser注册
@@ -167,7 +150,7 @@ private:
     void taskLoop(){
         taskSock=connectCoord("127.0.0.1",9099);
         while(!stop.load()){
-            json j=request(taskSock,"assignReduceTask",id);
+            json j=request(taskSock,"assignTask",id);
             Task task=j["result"].get<Task>();
             if(task.type==REDUCE){ //是reduce任务
                 if(task.id==-1){
@@ -175,45 +158,7 @@ private:
                     std::this_thread::sleep_for(std::chrono::milliseconds(hbIntervalMs));
                     continue;
                 }
-                std::cout<<"reduceId: "<<task.id<<std::endl;
-                for(auto& it:task.files){
-                    std::cout<<"filepath: "<<it<<std::endl;
-                }
-
-                auto& files = task.files;
-                std::vector<KeyValue> keyvals;
-                std::string key, val;
-                for (uint i = 0; i < files.size(); i++) {
-                    std::ifstream ifs(files[i]);
-                    while (ifs >> key >> val) {
-                        keyvals.push_back({ key, val });
-                    }
-                }
-
-                std::sort(keyvals.begin(),keyvals.end());
-
-                std::string preKey = keyvals[0].first;
-                std::vector<std::string> vals;
-                std::vector<KeyValue> ans;
-                for (uint i = 0; i < keyvals.size(); i++) {
-                    if (preKey != keyvals[i].first) {
-                        std::vector<std::string> rs = Reduce(preKey, vals);
-                        if (!rs.empty()) {
-                            ans.push_back({ preKey, rs[0] });
-                        }
-                        vals.clear();
-                        preKey = keyvals[i].first;
-                        vals.push_back(keyvals[i].second);
-                    } else {
-                        vals.push_back(keyvals[i].second);
-                    }
-                }
-                std::vector<std::string> rs = Reduce(preKey, vals);
-                if (!rs.empty()) {
-                    ans.push_back({ preKey, rs[0] });
-                }
-                std::string filepath=writeReduceAnsToFile(task.id,ans);
-
+                std::string filepath=processReduceAndWrite(task,id,taskSock);
                 j=request(taskSock,"reduceReport","127.0.0.1",9099,id,task.id,filepath);//上报reduce任务完成
                 std::cout<<"reduce report:"<<id<<"--"<<task.id<<std::endl;
             }else{ //是map任务

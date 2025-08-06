@@ -94,6 +94,7 @@ private:
         rpcServer.register_function("heartbeat",this,&Coordinator::heartbeat);
         rpcServer.register_function("assignTask",this,&Coordinator::assignTask);
         rpcServer.register_function("mapReport",this,&Coordinator::mapReport);
+        rpcServer.register_function("reduceReport",this,&Coordinator::reduceReport);
     }
 
     MapFile testfunc(){

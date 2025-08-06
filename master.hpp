@@ -10,10 +10,25 @@
 #include<unordered_map>
 #include<chrono>
 #include<csignal>
+#include <chrono>
+#include <ctime>
+#include<queue>
+#include <condition_variable>
+
+using std::chrono::duration_cast;
+using std::chrono::system_clock;
+
+std::string unix_timestamp_str()
+{
+    // 当前时间点 → 自纪元以来的秒数
+    auto seconds = duration_cast<std::chrono::seconds>(system_clock::now().time_since_epoch()).count();
+    return std::to_string(seconds);
+}
 
 using namespace std::chrono;
 
 struct WorkerInfo{
+    int rpcSock;
     int id=0;
     std::string addr;
     steady_clock::time_point lastHB;//最近一次心跳时间
@@ -43,15 +58,20 @@ private:
     std::atomic<bool> stop;
     std::unordered_map<int,WorkerInfo> workers;
     std::unordered_map<int,std::vector<MapFile>> mapOutFiles;  //每个mapId对应的mapFile列表
+    std::unordered_map<int,std::string> mapTimeStr; //每个mapId对应map任务完成的最新时间戳
     std::unordered_map<int,std::vector<MapFile>> reduceInputFiles; //每个reduceId对应的mapFile列表
     std::vector<MapFile> reduceAnsFiles; //reduce结果文件
     std::mutex reduceMapMtx;
     std::mutex mu;
     std::mutex task_mtx;
     RPCServer rpcServer;
-    std::thread rpcLoop,mLoop;
+    std::thread rpcLoop,mLoop,recoverLoop;
     const int PORT=9099;
     std::vector<Task> tasks;
+    std::queue<Task> recoverTasks;
+    int lastRecoverWorkId=-1;
+    std::mutex recoverMtx;
+    std::condition_variable not_empty;
     std::mutex mfMtx;
     std::mutex rdAnsMtx;
     std::atomic<int> mapCompleteCount;
@@ -106,6 +126,37 @@ private:
         return mf;
     }
 
+    void assignRecoverTask(){
+        while(!stop.load()){
+            std::unique_lock<std::mutex> lk(recoverMtx);
+            not_empty.wait(lk,[this]{return !this->recoverTasks.empty();});
+            Task task=this->recoverTasks.front();
+            this->recoverTasks.pop();
+            lk.unlock();
+            int num=0;
+            int workerNum=workers.size();
+            for(int i=lastRecoverWorkId+1;num<workerNum;i++,num++){
+                int workerId=i%workerNum;
+                {
+                    std::unique_lock<std::mutex> lck(workers[workerId].tsk_mtx);
+                    if(workers[workerId].alive){
+                        workers[workerId].tasks.push_back(task);
+                        int taskSock=workers[workerId].rpcSock;
+                        lck.unlock();
+                        json j=request(taskSock,"recoverTask",task);
+                        std::cout<<"assign recoverTask taskId:"<<task.id<<" taskType:"<<task.type<<" workerId:"<<workerId<<std::endl;
+                        break;
+                    }
+                }
+            }
+            if(num==workerNum){
+                perror("can not find alive worker\n");
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                continue;
+            }
+        }
+    }
+
     //分发map任务
     Task assignTask(int workerId){
         if(!isReduce.load()){
@@ -113,6 +164,7 @@ private:
             if(!tasks.empty()){
                 auto task=tasks.begin();
                 Task assignedTask=*task;
+                assignedTask.type=MAP;
                 tasks.erase(task);
                 {
                     std::lock_guard<std::mutex> lck(workers[workerId].tsk_mtx);
@@ -176,6 +228,7 @@ private:
         {
             std::lock_guard<std::mutex> lck(mfMtx);
             mapOutFiles[mapID]=std::move(mapFiles);
+            mapTimeStr[mapID]=unix_timestamp_str();   
         }
         finishMapTask(workerID,mapID);
         return 0;
@@ -220,6 +273,7 @@ public:
         rpcRegister();//注册rpc
         rpcLoop=std::thread([this]{this->rpcServer.startRpcLoop(PORT);});//开启循环
         mLoop=std::thread([this]{this->monitorLoop();});
+        recoverLoop=std::thread([this]{this->assignRecoverTask();});
         handle_sigint();
     }
 
@@ -242,6 +296,20 @@ public:
             for(int id:justDead){
                 std::cout<<"coordinator worker#"<<id<<" heartbeat timeout"<<std::endl;
                 //节点失效，重新分配任务
+                std::vector<Task> tasks;
+                {
+                    std::lock_guard<std::mutex> lck(workers[id].tsk_mtx);
+                    tasks=workers[id].tasks;
+                }
+                std::unique_lock<std::mutex> lck(recoverMtx);
+                for(auto& task:tasks){
+                    bool was_empty=recoverTasks.empty();
+                    recoverTasks.push(task);
+                    lck.unlock(); //先解锁再通知
+                    if(was_empty){
+                        not_empty.notify_one();
+                    }
+                }
             }
         }
     }
@@ -251,6 +319,7 @@ public:
         stop=true;
         rpcLoop.join();
         mLoop.join();
+        recoverLoop.join();
     }
 
     //信号触发退出回收套接字

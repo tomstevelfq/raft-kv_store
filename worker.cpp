@@ -50,6 +50,9 @@ public:
     :addr(addr),hbIntervalMs(hbIntervalMs),stop(false),id(0),R(0){}
 
     void start(){
+        rpcServer.register_function("recoverTask",this,&Worker::recoverTask);
+        rpcLoop=std::thread([this]{this->rpcServer.startRpcLoop(9900);});//开启循环
+        rpcServer.startRpcLoop(9900);
         serverSock=connectCoord("127.0.0.1",9099);
         json j=request(serverSock,"registerWorker","localhost");//向maser注册
         std::cout<<"result:"<<j["result"]<<std::endl;
@@ -82,12 +85,16 @@ public:
 
     //正常关闭
     void shutdown(){
+        rpcServer.stopServer();
         stop.store(true);
         if(hbThread.joinable()){
             hbThread.join();
         }
         if(taskThread.joinable()){
             taskThread.join();
+        }
+        if(rpcLoop.joinable()){
+            rpcLoop.join();
         }
         close(serverSock);
         std::cout<<"worker#"<<id<<" shutdown\n";
@@ -117,6 +124,22 @@ public:
         }
     }
 
+    //重新执行map或reduce任务 
+    int recoverTask(Task task){
+        if(task.type==MAP){
+            task.files[0]=readFile(task.files[0]);
+            std::vector<std::string> files(R);
+            processMapAndWrite(task.id,task.files[0],R,files);
+            json j=request(taskSock,"mapReport","127.0.0.1",9099,id,task.id,files);//上报map任务完成
+            std::cout<<"map report:"<<id<<"--"<<task.id<<std::endl;
+        }else{
+            std::string filepath=processReduceAndWrite(task,id,taskSock);
+            json j=request(taskSock,"reduceReport","127.0.0.1",9099,id,task.id,filepath);//上报reduce任务完成
+            std::cout<<"reduce report:"<<id<<"--"<<task.id<<std::endl;
+        }
+        return 0;
+    }
+
 
 private:
     std::string addr;
@@ -132,6 +155,8 @@ private:
     int serverSock;
     int taskSock;
     std::atomic<bool> isReduce=false;
+    RPCServer rpcServer;
+    std::thread rpcLoop;
 
     void heartbeatLoop(){
         while(!stop.load()){

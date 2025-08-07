@@ -14,6 +14,7 @@
 #include <ctime>
 #include<queue>
 #include <condition_variable>
+#include<memory>
 
 using std::chrono::duration_cast;
 using std::chrono::system_clock;
@@ -39,13 +40,6 @@ struct WorkerInfo{
     std::mutex tsk_mtx; //tasks锁
 };
 
-struct MapFile{
-    int workerID;
-    std::string addr;
-    int port;
-    std::string filepath;
-};
-
 class Coordinator{
 private:
     int nReduce;
@@ -56,7 +50,7 @@ private:
     int timeoutMs;
     std::atomic<int> nextId;
     std::atomic<bool> stop;
-    std::unordered_map<int,WorkerInfo> workers;
+    std::unordered_map<int,std::shared_ptr<WorkerInfo>> workers;
     std::unordered_map<int,std::vector<MapFile>> mapOutFiles;  //每个mapId对应的mapFile列表
     std::unordered_map<int,std::string> mapTimeStr; //每个mapId对应map任务完成的最新时间戳
     std::unordered_map<int,std::vector<MapFile>> reduceInputFiles; //每个reduceId对应的mapFile列表
@@ -78,16 +72,18 @@ private:
     std::atomic<int> reduceCompleteCount;
     int totalMapTasks;
     std::atomic<bool> isReduce;
+    std::unordered_map<std::string,std::vector<MapFile>> fileMap;
+    std::mutex fileMapMtx;
 
     std::pair<int,int> registerWorker(std::string addr){
         std::lock_guard<std::mutex> lk(mu);
         int id=nextId++;
-        WorkerInfo &wi=workers[id];
-        wi.id=id;
-        wi.addr=addr;
-        wi.lastHB=steady_clock::now();
-        wi.status="Register";
-        wi.alive=true;
+        auto wi=workers[id];
+        wi->id=id;
+        wi->addr=addr;
+        wi->lastHB=steady_clock::now();
+        wi->status="Register";
+        wi->alive=true;
         std::cout<<"Coordinator worker#"<<id<<" registered from "<<addr<<"(R=)"<<R<<std::endl;
         return {id,R};
     }
@@ -99,11 +95,11 @@ private:
         if(it==workers.end()){
             return false;
         }
-        it->second.lastHB=steady_clock::now();
-        it->second.status=status;
-        it->second.runningTask=runningTask;
-        if(!it->second.alive){
-            it->second.alive=true;
+        it->second->lastHB=steady_clock::now();
+        it->second->status=status;
+        it->second->runningTask=runningTask;
+        if(!it->second->alive){
+            it->second->alive=true;
             std::cout<<"coordinator worker#"<<workerId<<" revived by heartbeat"<<std::endl;
         }
         return true;
@@ -133,27 +129,20 @@ private:
             Task task=this->recoverTasks.front();
             this->recoverTasks.pop();
             lk.unlock();
-            int num=0;
-            int workerNum=workers.size();
-            for(int i=lastRecoverWorkId+1;num<workerNum;i++,num++){
-                int workerId=i%workerNum;
-                {
-                    std::unique_lock<std::mutex> lck(workers[workerId].tsk_mtx);
-                    if(workers[workerId].alive){
-                        workers[workerId].tasks.push_back(task);
-                        int taskSock=workers[workerId].rpcSock;
-                        lck.unlock();
-                        json j=request(taskSock,"recoverTask",task);
-                        std::cout<<"assign recoverTask taskId:"<<task.id<<" taskType:"<<task.type<<" workerId:"<<workerId<<std::endl;
-                        break;
-                    }
-                }
-            }
-            if(num==workerNum){
+
+            auto worker_ptr=getAliveWorker();
+            if(worker_ptr==nullptr){
                 perror("can not find alive worker\n");
                 std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                 continue;
             }
+
+            std::unique_lock<std::mutex> lck(worker_ptr->tsk_mtx);
+            worker_ptr->tasks.push_back(task);
+            int taskSock=worker_ptr->rpcSock;
+            lck.unlock();
+            json j=request(taskSock,"recoverTask",task);
+            std::cout<<"assign recoverTask taskId:"<<task.id<<" taskType:"<<task.type<<" workerId:"<<worker_ptr->id<<std::endl;
         }
     }
 
@@ -167,8 +156,9 @@ private:
                 assignedTask.type=MAP;
                 tasks.erase(task);
                 {
-                    std::lock_guard<std::mutex> lck(workers[workerId].tsk_mtx);
-                    workers[workerId].tasks.push_back(assignedTask);   //添加到worker的待完成任务队列中
+                    std::lock_guard<std::mutex> worklk(mu);
+                    std::lock_guard<std::mutex> lck(workers[workerId]->tsk_mtx);
+                    workers[workerId]->tasks.push_back(assignedTask);   //添加到worker的待完成任务队列中
                 }
                 return assignedTask;
             }else{
@@ -225,12 +215,43 @@ private:
             mf.filepath=it;
             mapFiles.push_back(mf);
         }
+
+        {
+            std::lock_guard<std::mutex> lck(fileMapMtx);
+            for(auto& file:mapFiles){
+                fileMap[file.filepath].push_back(file);
+            }
+        }
+
         {
             std::lock_guard<std::mutex> lck(mfMtx);
             mapOutFiles[mapID]=std::move(mapFiles);
             mapTimeStr[mapID]=unix_timestamp_str();   
         }
         finishMapTask(workerID,mapID);
+
+        {
+            auto worker_ptr=getAliveWorker();
+            if(worker_ptr==nullptr){
+                perror("can not find alive worker\n");
+                return 0;
+            }
+            if(worker_ptr->id==workerID){
+                worker_ptr=getAliveWorker();
+                if(worker_ptr->id==workerID){
+                    return 0; //找不到第二个工作节点
+                }
+            }
+
+            json j=request(worker_ptr->rpcSock,"copyFiles",mapFiles);
+            std::vector<MapFile> v=j["result"].get<std::vector<MapFile>>();
+            {
+                std::lock_guard<std::mutex> lck(fileMapMtx);
+                for(auto& file:v){
+                    fileMap[file.filepath].push_back(file);
+                }
+            }
+        }
         return 0;
     }
 
@@ -255,6 +276,28 @@ public:
     isReduce(false){
         tasks={{MAP,0,{"file1.txt"}},{MAP,1,{"file2.txt"}},{MAP,2,{"file3.txt"}}};//初始化任务列表
         totalMapTasks=tasks.size();
+    }
+
+    std::shared_ptr<WorkerInfo> getAliveWorker(){
+        std::lock_guard<std::mutex> worklk(mu);
+        int workerNum=workers.size();
+        int num=0;
+        int workerId=0;
+        for(int i=lastRecoverWorkId+1;num<=workerNum;i++,num++){
+            workerId=i%workerNum;
+            {
+                if(workers[workerId]->alive){
+                    break;
+                }
+            }
+        }
+
+        if(num==workerNum){
+            perror("can not find alive worker\n");
+            return nullptr;
+        }
+        lastRecoverWorkId=(lastRecoverWorkId+num)%workerNum;
+        return workers[workerId];
     }
 
     //开启reduce阶段
@@ -284,10 +327,10 @@ public:
             {
                 std::lock_guard<std::mutex> lk(mu);
                 auto now=steady_clock::now();
-                for(auto& [id,w]: workers){
-                    auto ms=duration_cast<milliseconds>(now-w.lastHB).count();
-                    if(w.alive&&ms>timeoutMs){
-                        w.alive=false;
+                for(auto [id,w]: workers){
+                    auto ms=duration_cast<milliseconds>(now-w->lastHB).count();
+                    if(w->alive&&ms>timeoutMs){
+                        w->alive=false;
                         justDead.push_back(id);
                     }
                 }
@@ -298,8 +341,9 @@ public:
                 //节点失效，重新分配任务
                 std::vector<Task> tasks;
                 {
-                    std::lock_guard<std::mutex> lck(workers[id].tsk_mtx);
-                    tasks=workers[id].tasks;
+                    std::lock_guard<std::mutex> worklk(mu);
+                    std::lock_guard<std::mutex> lck(workers[id]->tsk_mtx);
+                    tasks=workers[id]->tasks;
                 }
                 std::unique_lock<std::mutex> lck(recoverMtx);
                 for(auto& task:tasks){

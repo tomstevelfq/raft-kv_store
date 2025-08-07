@@ -40,6 +40,31 @@ inline void from_json(const json& j, Task& task) {
     j.at("files").get_to(task.files);
 }
 
+struct MapFile{
+    int workerID;
+    std::string addr;
+    int port;
+    std::string filepath;
+};
+
+// 序列化：MapFile -> json
+inline void to_json(json& j, const MapFile& mf) {
+    j = json{
+        {"workerID", mf.workerID},
+        {"addr", mf.addr},
+        {"port", mf.port},
+        {"filepath", mf.filepath}
+    };
+}
+
+// 反序列化：json -> MapFile
+inline void from_json(const json& j, MapFile& mf) {
+    j.at("workerID").get_to(mf.workerID);
+    j.at("addr").get_to(mf.addr);
+    j.at("port").get_to(mf.port);
+    j.at("filepath").get_to(mf.filepath);
+}
+
 // 简单的 Map 函数，统计单词出现次数
 void combiner(std::vector<std::pair<std::string,int>>& kvs){
     std::unordered_map<std::string,int> counts;
@@ -190,6 +215,21 @@ std::string readFile(std::string filename){
                          std::istreambuf_iterator<char>());
 
     return content;
+}
+
+void writeFile(const std::string& content,const std::string& filename){
+    // 打开输出文件流（默认是 std::ios::out）
+    std::ofstream outFile(filename);
+    if (!outFile) {
+        std::cerr << "无法打开文件进行写入: " << filename << std::endl;
+        return;
+    }
+
+    // 写入字符串内容
+    outFile << content;
+
+    // 可选：关闭文件（析构函数也会自动关闭）
+    outFile.close();
 }
 
 void mergeFiles(const std::vector<std::string>& inputFiles, const std::string& outputFile) {

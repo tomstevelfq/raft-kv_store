@@ -47,10 +47,12 @@ std::string WordCountReduce(const std::string& key,const std::vector<std::string
 class Worker{
 public:
     Worker(std::string addr,int hbIntervalMs)
-    :addr(addr),hbIntervalMs(hbIntervalMs),stop(false),id(0),R(0){}
+    :addr(addr),hbIntervalMs(hbIntervalMs),stop(false),id(0),R(0),rpcPort(9900){}
 
     void start(){
         rpcServer.register_function("recoverTask",this,&Worker::recoverTask);
+        rpcServer.register_function("copyFiles",this,&Worker::copyFiles);
+        rpcServer.register_function("copyFileFromWorker",this,&Worker::copyFileFromWorker);
         rpcLoop=std::thread([this]{this->rpcServer.startRpcLoop(9900);});//开启循环
         rpcServer.startRpcLoop(9900);
         serverSock=connectCoord("127.0.0.1",9099);
@@ -140,6 +142,26 @@ public:
         return 0;
     }
 
+    std::string copyFileFromWorker(std::string filepath){
+        std::string content=readFile(filepath);
+        return content;
+    }
+
+    std::vector<MapFile> copyFiles(std::vector<MapFile> files){
+        std::vector<MapFile> ret;
+        for(auto& file:files){
+            std::string content=copyFileFromWorker(file.filepath);
+            writeFile(content,file.filepath);
+            MapFile mf;
+            mf.filepath=file.filepath;
+            mf.addr=addr;
+            mf.port=rpcPort;
+            mf.workerID=id;
+            ret.push_back(mf);
+        }
+        return ret;
+    }
+
 
 private:
     std::string addr;
@@ -157,6 +179,7 @@ private:
     std::atomic<bool> isReduce=false;
     RPCServer rpcServer;
     std::thread rpcLoop;
+    int rpcPort;
 
     void heartbeatLoop(){
         while(!stop.load()){

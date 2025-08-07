@@ -58,7 +58,7 @@ private:
     std::mutex reduceMapMtx;
     std::mutex mu;
     std::mutex task_mtx;
-    RPCServer rpcServer;
+    std::shared_ptr<RPCServer> rpcServer;
     std::thread rpcLoop,mLoop,recoverLoop;
     const int PORT=9099;
     std::vector<Task> tasks;
@@ -74,6 +74,7 @@ private:
     std::atomic<bool> isReduce;
     std::unordered_map<std::string,std::vector<MapFile>> fileMap;
     std::mutex fileMapMtx;
+    std::shared_ptr<ThreadPool> pool;
 
     std::pair<int,int> registerWorker(std::string addr){
         std::lock_guard<std::mutex> lk(mu);
@@ -106,11 +107,11 @@ private:
     }
 
     void rpcRegister(){
-        rpcServer.register_function("registerWorker",this,&Coordinator::registerWorker);
-        rpcServer.register_function("heartbeat",this,&Coordinator::heartbeat);
-        rpcServer.register_function("assignTask",this,&Coordinator::assignTask);
-        rpcServer.register_function("mapReport",this,&Coordinator::mapReport);
-        rpcServer.register_function("reduceReport",this,&Coordinator::reduceReport);
+        rpcServer->register_function("registerWorker",this,&Coordinator::registerWorker);
+        rpcServer->register_function("heartbeat",this,&Coordinator::heartbeat);
+        rpcServer->register_function("assignTask",this,&Coordinator::assignTask);
+        rpcServer->register_function("mapReport",this,&Coordinator::mapReport);
+        rpcServer->register_function("reduceReport",this,&Coordinator::reduceReport);
     }
 
     MapFile testfunc(){
@@ -206,50 +207,48 @@ private:
 
     //节点map结果上报
     int mapReport(const std::string addr,int port,int workerID,int mapID,const std::vector<std::string> filepaths){
-        std::vector<MapFile> mapFiles;
+        auto mapFiles=std::make_shared<std::vector<MapFile>>();
         for(auto& it:filepaths){
             MapFile mf;
             mf.addr=addr;
             mf.port=port;
             mf.workerID=workerID;
             mf.filepath=it;
-            mapFiles.push_back(mf);
+            mapFiles->push_back(mf);
         }
 
         {
             std::lock_guard<std::mutex> lck(fileMapMtx);
-            for(auto& file:mapFiles){
+            for(auto file:*mapFiles){
                 fileMap[file.filepath].push_back(file);
             }
         }
 
         {
             std::lock_guard<std::mutex> lck(mfMtx);
-            mapOutFiles[mapID]=std::move(mapFiles);
+            mapOutFiles[mapID]=std::move(*mapFiles);
             mapTimeStr[mapID]=unix_timestamp_str();   
         }
         finishMapTask(workerID,mapID);
 
-        {
-            auto worker_ptr=getAliveWorker();
-            if(worker_ptr==nullptr){
-                perror("can not find alive worker\n");
-                return 0;
-            }
+        auto worker_ptr=getAliveWorker();
+        if(worker_ptr==nullptr){
+            perror("can not find alive worker\n");
+            return 0;
+        }
+        if(worker_ptr->id==workerID){
+            worker_ptr=getAliveWorker();
             if(worker_ptr->id==workerID){
-                worker_ptr=getAliveWorker();
-                if(worker_ptr->id==workerID){
-                    return 0; //找不到第二个工作节点
-                }
+                return 0; //找不到第二个工作节点
             }
+        }
 
-            json j=request(worker_ptr->rpcSock,"copyFiles",mapFiles);
-            std::vector<MapFile> v=j["result"].get<std::vector<MapFile>>();
-            {
-                std::lock_guard<std::mutex> lck(fileMapMtx);
-                for(auto& file:v){
-                    fileMap[file.filepath].push_back(file);
-                }
+        json j=request(worker_ptr->rpcSock,"copyFiles",*mapFiles);
+        std::vector<MapFile> v=j["result"].get<std::vector<MapFile>>();
+        {
+            std::lock_guard<std::mutex> lck(fileMapMtx);
+            for(auto& file:v){
+                fileMap[file.filepath].push_back(file);
             }
         }
         return 0;
@@ -313,8 +312,10 @@ public:
     }
 
     void handleLoop(){
+        pool=std::make_shared<ThreadPool>(5);
+        rpcServer=std::make_shared<RPCServer>(pool);
         rpcRegister();//注册rpc
-        rpcLoop=std::thread([this]{this->rpcServer.startRpcLoop(PORT);});//开启循环
+        rpcLoop=std::thread([this]{this->rpcServer->startRpcLoop(PORT);});//开启循环
         mLoop=std::thread([this]{this->monitorLoop();});
         recoverLoop=std::thread([this]{this->assignRecoverTask();});
         handle_sigint();
@@ -359,7 +360,7 @@ public:
     }
 
     void stopCoordinator(){
-        rpcServer.stopServer();
+        rpcServer->stopServer();
         stop=true;
         rpcLoop.join();
         mLoop.join();

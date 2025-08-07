@@ -53,6 +53,12 @@ inline std::string make_request(const std::string& method,Args&&... args){
 class RPCServer{
     public:
     using Handler=std::function<json(const json&)>;
+    RPCServer(std::shared_ptr<ThreadPool> p=nullptr){
+        if(p==nullptr){
+            p=std::make_shared<ThreadPool>(5);
+        }
+        pool=p;
+    }
 
     //普通函数重载
     template<typename R,typename... Args>
@@ -114,9 +120,6 @@ class RPCServer{
 
         fd_set readfds;
         std::vector<int> client_sockets;//存储客户端套接字
-
-        //线程池
-        ThreadPool pool(5);
 
         struct timeval timeout;
         timeout.tv_sec=3;
@@ -181,7 +184,7 @@ class RPCServer{
                             std::string resp=ret.dump();
                             send(client_socket,resp.c_str(),resp.size(),0);
                         };
-                        pool.submit(fn);
+                        pool->submit(fn);
                     }
                 }
             }
@@ -200,5 +203,8 @@ class RPCServer{
     private:
     std::unordered_map<std::string,Handler> handlers;
     std::atomic<bool> stop=false;
+    //线程池
+    std::shared_ptr<ThreadPool> pool;
+
 };
 

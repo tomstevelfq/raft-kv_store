@@ -77,6 +77,15 @@ private:
     std::mutex fileMapMtx;
     std::shared_ptr<ThreadPool> pool;
 
+    FileItem getBakFile(FileItem file){
+        for(auto& it:fileMap[file.filepath]){
+            if(!(it.file.addr==file.addr&&it.file.port==file.port)){
+                return it.file;
+            }
+        }
+        return {};
+    }
+
     std::pair<int,int> registerWorker(std::string addr){
         std::lock_guard<std::mutex> lk(mu);
         int id=nextId++;
@@ -114,6 +123,7 @@ private:
         rpcServer->register_function("mapReport",this,&Coordinator::mapReport);
         rpcServer->register_function("reduceReport",this,&Coordinator::reduceReport);
         rpcServer->register_function("getFile",this,&Coordinator::getFile);
+        rpcServer->register_function("getBakFile",this,&Coordinator::getBakFile);
     }
 
     void assignRecoverTask(){
@@ -135,7 +145,25 @@ private:
             worker_ptr->tasks.push_back(task);
             int taskSock=worker_ptr->rpcSock;
             lck.unlock();
-            json j=request(taskSock,"recoverTask",task);
+            auto [ok,j]=request(taskSock,"recoverTask",task);
+            if(!ok){
+                std::unique_lock<std::mutex> lk(recoverMtx);
+                recoverTasks.push(task);
+                bool was_empty=recoverTasks.empty();
+                lk.unlock();
+                if(was_empty){
+                    not_empty.notify_one();
+                }
+
+                std::lock_guard<std::mutex> lck(worker_ptr->tsk_mtx);
+                for(auto it=worker_ptr->tasks.begin();it!=worker_ptr->tasks.end();++it){
+                    if(it->id==task.id){
+                        worker_ptr->tasks.erase(it);
+                        break;
+                    }
+                }
+                continue;
+            }
             std::cout<<"assign recoverTask taskId:"<<task.id<<" taskType:"<<task.type<<" workerId:"<<worker_ptr->id<<std::endl;
         }
     }
@@ -189,11 +217,11 @@ private:
         if(reduceCompleteCount==R){
             //归约reduce结果
             std::string resultfile="./reduce/result";
-            std::vector<FileItem> inputFiles;
+            std::vector<std::pair<int,FileItem>> inputFiles;
             {
                 std::lock_guard<std::mutex> lck(rdAnsMtx);
                 for(auto& it:reduceAnsFiles){
-                    inputFiles.push_back(it.file);
+                    inputFiles.push_back({it.workerID,it.file});
                 }
             }
             mergeFiles(inputFiles,resultfile,workers[workerId]->rpcSock);
@@ -233,25 +261,31 @@ private:
         }
         finishMapTask(workerID,mapID);
 
-        auto worker_ptr=getAliveWorker();
-        if(worker_ptr==nullptr){
-            perror("can not find alive worker\n");
-            return 0;
-        }
-        if(worker_ptr->id==workerID){
-            worker_ptr=getAliveWorker();
+        while(true){
+            auto worker_ptr=getAliveWorker();
+            if(worker_ptr==nullptr){
+                perror("can not find alive worker\n");
+                return 0;
+            }
             if(worker_ptr->id==workerID){
-                return 0; //找不到第二个工作节点
+                worker_ptr=getAliveWorker();
+                if(worker_ptr->id==workerID){
+                    return 0; //找不到第二个工作节点
+                }
             }
-        }
 
-        json j=request(worker_ptr->rpcSock,"copyFiles",*mapFiles);
-        std::vector<MapFile> v=j["result"].get<std::vector<MapFile>>();
-        {
-            std::lock_guard<std::mutex> lck(fileMapMtx);
-            for(auto& it:v){
-                fileMap[it.file.filepath].push_back(it);
+            auto [ok,j]=request(worker_ptr->rpcSock,"copyFiles",*mapFiles);
+            if(!ok){
+                continue;
             }
+            std::vector<MapFile> v=j["result"].get<std::vector<MapFile>>();
+            {
+                std::lock_guard<std::mutex> lck(fileMapMtx);
+                for(auto& it:v){
+                    fileMap[it.file.filepath].push_back(it);
+                }
+            }
+            break;
         }
         return 0;
     }
@@ -348,22 +382,30 @@ public:
 
             for(int id:justDead){
                 std::cout<<"coordinator worker#"<<id<<" heartbeat timeout"<<std::endl;
-                //节点失效，重新分配任务
-                std::vector<Task> tasks;
-                {
-                    std::lock_guard<std::mutex> worklk(mu);
-                    std::lock_guard<std::mutex> lck(workers[id]->tsk_mtx);
-                    tasks=workers[id]->tasks;
-                }
-                std::unique_lock<std::mutex> lck(recoverMtx);
-                for(auto& task:tasks){
-                    bool was_empty=recoverTasks.empty();
-                    recoverTasks.push(task);
-                    lck.unlock(); //先解锁再通知
-                    if(was_empty){
-                        not_empty.notify_one();
-                    }
-                }
+                redoTask(id);
+            }
+        }
+    }
+
+    //把重做任务放入recoverTasks队列
+    void redoTask(int id){
+        //节点失效，重新分配任务
+        std::vector<Task> tasks;
+        {
+            std::lock_guard<std::mutex> worklk(mu);
+            std::lock_guard<std::mutex> lck(workers[id]->tsk_mtx);
+            tasks=workers[id]->tasks;
+        }
+        std::unique_lock<std::mutex> lck(recoverMtx);
+        for(auto& task:tasks){
+            if(task.type==MAP){
+                continue;
+            }
+            bool was_empty=recoverTasks.empty();
+            recoverTasks.push(task);
+            lck.unlock(); //先解锁再通知
+            if(was_empty){
+                not_empty.notify_one();
             }
         }
     }
@@ -463,7 +505,7 @@ public:
         return finalOut;
     }
 
-    void mergeFiles(const std::vector<FileItem>& inputFiles, const std::string& outputFile, int sock) {
+    void mergeFiles(const std::vector<std::pair<int,FileItem>>& inputFiles, const std::string& outputFile, int sock) {
         std::ofstream out(outputFile, std::ios::out | std::ios::binary);
         if (!out) {
             std::cerr << "Cannot open output file: " << outputFile << std::endl;
@@ -471,7 +513,19 @@ public:
         }
 
         for (const auto& file : inputFiles) {
-            json j=request(sock,"getFile",file);
+            auto [ok,j]=request(file.first,"getFile",file.second);
+            if(!ok){
+                out.close();
+                out.open(outputFile, std::ios::out | std::ios::binary | std::ios::trunc);
+                reduceCompleteCount--;
+                std::lock_guard<std::mutex> lk(mu);
+                for(auto it:workers){
+                    if(it.second->rpcSock==sock){
+                        redoTask(it.second->id);
+                        return;
+                    }
+                }
+            }
             std::string content=std::move(j["result"].get<std::string>());
             out.write(content.data(),content.size());
         }

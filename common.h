@@ -169,20 +169,64 @@ void processMapAndWrite(int mapID,const std::string& text,int R,std::vector<std:
 }
 
 template<typename... Args>
-json request(int sock,const std::string& name,Args... args){
-    char buffer[1024]={0};
-    std::string req=make_request(name,args...);
-    std::cout<<"req:"<<req<<std::endl;
-    send(sock,req.c_str(),req.size(),0);
-    int bytes=read(sock,buffer,1024);
-    if(bytes<=0){
-        json j;
-        j["result"]=-1;
-        return j;
+std::pair<bool, json> request(int sock, const std::string& name, Args&&... args) {
+    char buffer[1024] = {0};
+
+    // 构造请求
+    std::string req = make_request(name, std::forward<Args>(args)...);
+    std::cout << "req:" << req << std::endl;
+
+    // 发送（简单版：未处理部分发送，若需要请改成 send 循环）
+    ssize_t sent = send(sock, req.c_str(), req.size(), 0);
+    if (sent < 0 || static_cast<size_t>(sent) != req.size()) {
+        json err = {
+            {"code", -1001},
+            {"message", "send failed or partial send"}
+        };
+        return {false, err};
     }
-    std::string resp(buffer,bytes);
-    json j=json::parse(resp);
-    return j;
+
+    // 接收（简单版：一次 read；若协议可能超 1024 或分片，请改循环读取）
+    int bytes = read(sock, buffer, sizeof(buffer));
+    if (bytes <= 0) {
+        json err = {
+            {"code", -1002},
+            {"message", "read failed or connection closed"}
+        };
+        return {false, err};
+    }
+
+    // 解析 JSON
+    std::string resp(buffer, bytes);
+    try {
+        json j = json::parse(resp);
+
+        // 约定：result == 0 表示成功
+        int result_code = 0;
+        if (j.contains("result")) {
+            result_code = j["result"].get<int>();
+        } else if (j.contains("code")) {
+            result_code = j["code"].get<int>(); // 兼容另一种字段名
+        } else {
+            // 未携带结果码，视为协议错误
+            json err = {
+                {"code", -1003},
+                {"message", "missing result/code in response"},
+                {"raw", j}
+            };
+            return {false, err};
+        }
+
+        bool ok = (result_code == 0);
+        return {ok, j};
+    } catch (const std::exception& e) {
+        json err = {
+            {"code", -1004},
+            {"message", std::string("json parse error: ") + e.what()},
+            {"raw", resp}
+        };
+        return {false, err};
+    }
 }
 
 //文件读取函数

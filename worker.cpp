@@ -126,17 +126,28 @@ public:
         }
     }
 
+    //获取本节点文件
+    std::string getFile(std::string filepath){
+        //进行一些ip端口的检查等
+        return readFile(filepath);
+    }
+
     //重新执行map或reduce任务 
     int recoverTask(Task task){
         if(task.type==MAP){
-            task.files[0]=readFile(task.files[0]);
+            task.files[0].content=getNodeFile(task.files[0].filepath,serverSock);
             std::vector<std::string> files(R);
-            processMapAndWrite(task.id,task.files[0],R,files);
-            json j=request(taskSock,"mapReport","127.0.0.1",9099,id,task.id,files);//上报map任务完成
+            processMapAndWrite(task.id,task.files[0].content,R,files);
+            std::vector<FileItem> fileItems(R);
+            for(int i=0;i<files.size();i++){
+                fileItems[i]=makeFileItem(files[i]);
+            }
+            request(taskSock,"mapReport","127.0.0.1",9099,id,task.id,fileItems);//上报map任务完成
             std::cout<<"map report:"<<id<<"--"<<task.id<<std::endl;
         }else{
             std::string filepath=processReduceAndWrite(task,id,taskSock);
-            json j=request(taskSock,"reduceReport","127.0.0.1",9099,id,task.id,filepath);//上报reduce任务完成
+            FileItem file=makeFileItem(filepath);
+            json j=request(taskSock,"reduceReport","127.0.0.1",9099,id,task.id,file);//上报reduce任务完成
             std::cout<<"reduce report:"<<id<<"--"<<task.id<<std::endl;
         }
         return 0;
@@ -149,11 +160,13 @@ public:
 
     std::vector<MapFile> copyFiles(std::vector<MapFile> files){
         std::vector<MapFile> ret;
-        for(auto& file:files){
-            std::string content=copyFileFromWorker(file.filepath);
-            writeFile(content,file.filepath);
+        for(auto& it:files){
+            std::string content=copyFileFromWorker(it.file.filepath);
+            writeFile(content,it.file.filepath);
             MapFile mf;
-            mf.filepath=file.filepath;
+            mf.file.filepath=it.file.filepath;
+            mf.file.addr=addr;
+            mf.file.port=rpcPort;
             mf.addr=addr;
             mf.port=rpcPort;
             mf.workerID=id;
@@ -180,6 +193,20 @@ private:
     RPCServer rpcServer;
     std::thread rpcLoop;
     int rpcPort;
+
+    FileItem makeFileItem(std::string filepath){
+        FileItem file;
+        file.addr=addr;
+        file.port=rpcPort;
+        file.filepath=filepath;
+    }
+
+    void registerRpc(){
+        rpcServer.register_function("recoverTask",this,&Worker::recoverTask);
+        rpcServer.register_function("copyFiles",this,&Worker::copyFiles);
+        rpcServer.register_function("copyFileFromWorker",this,&Worker::copyFileFromWorker);
+        rpcServer.register_function("getFile",this,&Worker::getFile);
+    }
 
     void heartbeatLoop(){
         while(!stop.load()){
@@ -211,10 +238,10 @@ private:
                 std::cout<<"reduce report:"<<id<<"--"<<task.id<<std::endl;
             }else{ //是map任务
                 if(task.id!=-1){
-                    std::cout<<"solving task "<<task.id<<" "<<task.files[0]<<std::endl;
-                    task.files[0]=readFile(task.files[0]);
+                    std::cout<<"solving task "<<task.id<<" "<<task.files[0].filepath<<std::endl;
+                    task.files[0].content=getNodeFile(task.files[0].filepath,serverSock);
                     std::vector<std::string> files(R);
-                    processMapAndWrite(task.id,task.files[0],R,files);
+                    processMapAndWrite(task.id,task.files[0].content,R,files);
                     j=request(taskSock,"mapReport","127.0.0.1",9099,id,task.id,files);//上报map任务完成
                     std::cout<<"map report:"<<id<<"--"<<task.id<<std::endl;
                 }

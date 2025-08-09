@@ -43,6 +43,7 @@ struct WorkerInfo{
 class Coordinator{
 private:
     int nReduce;
+    std::string addr;
     std::vector<std::pair<std::string,std::string>> inputs;
     MapFn mapfn;
     ReduceFn reducefn;
@@ -112,15 +113,7 @@ private:
         rpcServer->register_function("assignTask",this,&Coordinator::assignTask);
         rpcServer->register_function("mapReport",this,&Coordinator::mapReport);
         rpcServer->register_function("reduceReport",this,&Coordinator::reduceReport);
-    }
-
-    MapFile testfunc(){
-        MapFile mf;
-        mf.addr="fdsf";
-        mf.filepath="fdfs";
-        mf.port=23;
-        mf.workerID=34;
-        return mf;
+        rpcServer->register_function("getFile",this,&Coordinator::getFile);
     }
 
     void assignRecoverTask(){
@@ -174,7 +167,7 @@ private:
                 rt.type=REDUCE;
                 rt.id=it->first;
                 for(auto& it:it->second){
-                    rt.files.push_back(it.filepath);
+                    rt.files.push_back(it.file);
                 }
                 reduceInputFiles.erase(it);
                 return rt;
@@ -196,31 +189,41 @@ private:
         if(reduceCompleteCount==R){
             //归约reduce结果
             std::string resultfile="./reduce/result";
-            std::vector<std::string> inputFiles;
-            for(auto& it:reduceAnsFiles){
-                inputFiles.push_back(it.filepath);
+            std::vector<FileItem> inputFiles;
+            {
+                std::lock_guard<std::mutex> lck(rdAnsMtx);
+                for(auto& it:reduceAnsFiles){
+                    inputFiles.push_back(it.file);
+                }
             }
-            mergeFiles(inputFiles,resultfile);
+            mergeFiles(inputFiles,resultfile,workers[workerId]->rpcSock);
         }
         return 0;
     }
 
+    //获取本节点文件
+    std::string getFile(std::string filepath){
+        //进行一些ip端口的检查等
+        return readFile(filepath);
+    }
+
     //节点map结果上报
-    int mapReport(const std::string addr,int port,int workerID,int mapID,const std::vector<std::string> filepaths){
+    int mapReport(const std::string addr,int port,int workerID,int mapID,const std::vector<FileItem> files){
         auto mapFiles=std::make_shared<std::vector<MapFile>>();
-        for(auto& it:filepaths){
+        for(auto& it:files){
             MapFile mf;
             mf.addr=addr;
             mf.port=port;
             mf.workerID=workerID;
-            mf.filepath=it;
+            mf.file=it;
             mapFiles->push_back(mf);
         }
 
         {
             std::lock_guard<std::mutex> lck(fileMapMtx);
-            for(auto file:*mapFiles){
-                fileMap[file.filepath].push_back(file);
+            for(auto& it:*mapFiles){
+                std::string filename=getFileName(it.file.filepath);
+                fileMap[filename].push_back(it);
             }
         }
 
@@ -247,20 +250,21 @@ private:
         std::vector<MapFile> v=j["result"].get<std::vector<MapFile>>();
         {
             std::lock_guard<std::mutex> lck(fileMapMtx);
-            for(auto& file:v){
-                fileMap[file.filepath].push_back(file);
+            for(auto& it:v){
+                std::string filename=getFileName(it.file.filepath);
+                fileMap[filename].push_back(it);
             }
         }
         return 0;
     }
 
     //节点reduce结果上报
-    int reduceReport(const std::string addr,int port,int workerID,int reduceID,const std::string filepath){
+    int reduceReport(const std::string addr,int port,int workerID,int reduceID,FileItem file){
         MapFile mf;
         mf.addr=addr;
         mf.port=port;
         mf.workerID=workerID;
-        mf.filepath=filepath;
+        mf.file=file;
 
         {
             std::lock_guard<std::mutex> lck(rdAnsMtx);
@@ -272,8 +276,8 @@ private:
 
 public:
     explicit Coordinator(int R,int timeoutMs):R(R),timeoutMs(timeoutMs),nextId(1),stop(false),mapCompleteCount(0),
-    isReduce(false){
-        tasks={{MAP,0,{"file1.txt"}},{MAP,1,{"file2.txt"}},{MAP,2,{"file3.txt"}}};//初始化任务列表
+    isReduce(false),addr("127.0.0.1"){
+        tasks={{MAP,0,{makeFileItem("file1.txt")}},{MAP,1,{makeFileItem("file2.txt")}},{MAP,2,{makeFileItem("file3.txt")}}};//初始化任务列表
         totalMapTasks=tasks.size();
     }
 
@@ -297,6 +301,13 @@ public:
         }
         lastRecoverWorkId=(lastRecoverWorkId+num)%workerNum;
         return workers[workerId];
+    }
+
+    FileItem makeFileItem(std::string filepath){
+        FileItem file;
+        file.addr=addr;
+        file.port=PORT;
+        file.filepath=filepath;
     }
 
     //开启reduce阶段
@@ -452,5 +463,22 @@ public:
         }
 
         return finalOut;
+    }
+
+    void mergeFiles(const std::vector<FileItem>& inputFiles, const std::string& outputFile, int sock) {
+        std::ofstream out(outputFile, std::ios::out | std::ios::binary);
+        if (!out) {
+            std::cerr << "Cannot open output file: " << outputFile << std::endl;
+            return;
+        }
+
+        for (const auto& file : inputFiles) {
+            json j=request(sock,"getFile",file);
+            std::string content=std::move(j["result"].get<std::string>());
+            out.write(content.data(),content.size());
+        }
+
+        out.close();
+        std::cout << "Merged " << inputFiles.size() << " files into " << outputFile << std::endl;
     }
 };

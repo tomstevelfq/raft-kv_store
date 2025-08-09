@@ -8,8 +8,10 @@
 #include<unistd.h>
 #include<cstring>
 #include<csignal>
-using json=nlohmann::json;
+#include<filesystem>
 
+using json=nlohmann::json;
+namespace fs=std::filesystem;
 const int REDUCE_FLAG=-2;
 using MapKV=std::pair<std::string,std::string>;
 using MapFn=std::function<std::vector<MapKV>(const std::string&,const std::string&)>;
@@ -18,33 +20,55 @@ using KeyValue=std::pair<std::string,std::string>;
 
 const int MAP=1;
 const int REDUCE=2;
+struct FileItem{
+    std::string addr;
+    int port;
+    std::string filepath;
+    std::string content;
+};
 struct Task{
     int type;
     int id;
-    std::vector<std::string> files;
+    std::vector<FileItem> files;
 };
 
-// 序列化：Task -> json
+// 先为 FileItem 定义
+inline void to_json(json& j, const FileItem& f) {
+    j = json{
+        {"addr", f.addr},
+        {"port", f.port},
+        {"filepath", f.filepath},
+        {"content",f.content}
+    };
+}
+
+inline void from_json(const json& j, FileItem& f) {
+    j.at("addr").get_to(f.addr);
+    j.at("port").get_to(f.port);
+    j.at("filepath").get_to(f.filepath);
+    j.at("content").get_to(f.content);
+}
+
+// 再为 Task 定义（依赖于 FileItem 的定义）
 inline void to_json(json& j, const Task& task) {
     j = json{
         {"type", task.type},
         {"id", task.id},
-        {"files", task.files}
+        {"files", task.files}  // 自动使用 FileItem 的 to_json
     };
 }
 
-// 反序列化：json -> Task
 inline void from_json(const json& j, Task& task) {
     j.at("type").get_to(task.type);
     j.at("id").get_to(task.id);
-    j.at("files").get_to(task.files);
+    j.at("files").get_to(task.files);  // 自动使用 FileItem 的 from_json
 }
 
 struct MapFile{
     int workerID;
     std::string addr;
     int port;
-    std::string filepath;
+    FileItem file;
 };
 
 // 序列化：MapFile -> json
@@ -53,7 +77,7 @@ inline void to_json(json& j, const MapFile& mf) {
         {"workerID", mf.workerID},
         {"addr", mf.addr},
         {"port", mf.port},
-        {"filepath", mf.filepath}
+        {"file", mf.file}  // 直接存储整个 FileItem
     };
 }
 
@@ -62,7 +86,7 @@ inline void from_json(const json& j, MapFile& mf) {
     j.at("workerID").get_to(mf.workerID);
     j.at("addr").get_to(mf.addr);
     j.at("port").get_to(mf.port);
-    j.at("filepath").get_to(mf.filepath);
+    j.at("file").get_to(mf.file);  // 直接解析成 FileItem
 }
 
 // 简单的 Map 函数，统计单词出现次数
@@ -164,14 +188,14 @@ json request(int sock,const std::string& name,Args... args){
 std::string processReduceAndWrite(Task& task,int workerId,int taskSock){
     std::cout<<"reduceId: "<<task.id<<std::endl;
     for(auto& it:task.files){
-        std::cout<<"filepath: "<<it<<std::endl;
+        std::cout<<"filepath: "<<it.filepath<<std::endl;
     }
 
     auto& files = task.files;
     std::vector<KeyValue> keyvals;
     std::string key, val;
     for (uint i = 0; i < files.size(); i++) {
-        std::ifstream ifs(files[i]);
+        std::ifstream ifs(files[i].filepath);
         while (ifs >> key >> val) {
             keyvals.push_back({ key, val });
         }
@@ -232,24 +256,13 @@ void writeFile(const std::string& content,const std::string& filename){
     outFile.close();
 }
 
-void mergeFiles(const std::vector<std::string>& inputFiles, const std::string& outputFile) {
-    std::ofstream out(outputFile, std::ios::out | std::ios::binary);
-    if (!out) {
-        std::cerr << "Cannot open output file: " << outputFile << std::endl;
-        return;
-    }
+//获取节点上的远程文件
+std::string getNodeFile(std::string filepath,int sock){
+    json j=request(sock,"getFile",filepath);
+    std::string content=std::move(j["result"].get<std::string>());
+    return content;
+}
 
-    for (const auto& file : inputFiles) {
-        std::ifstream in(file, std::ios::in | std::ios::binary);
-        if (!in) {
-            std::cerr << "Cannot open input file: " << file << std::endl;
-            continue; // Skip this file
-        }
-
-        out << in.rdbuf(); // 将输入文件内容直接写入输出文件
-        in.close();
-    }
-
-    out.close();
-    std::cout << "Merged " << inputFiles.size() << " files into " << outputFile << std::endl;
+std::string getFileName(std::string path){
+    return fs::path(path).filename().string();
 }

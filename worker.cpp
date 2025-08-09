@@ -55,7 +55,7 @@ public:
         rpcServer.register_function("copyFileFromWorker",this,&Worker::copyFileFromWorker);
         rpcLoop=std::thread([this]{this->rpcServer.startRpcLoop(9900);});//开启循环
         rpcServer.startRpcLoop(9900);
-        serverSock=connectCoord("127.0.0.1",9099);
+        serverSock=connectNode("127.0.0.1",9099);
         json j=request(serverSock,"registerWorker","localhost");//向maser注册
         std::cout<<"result:"<<j["result"]<<std::endl;
         auto result=j["result"].get<std::pair<int,int>>();
@@ -145,7 +145,7 @@ public:
             request(taskSock,"mapReport","127.0.0.1",9099,id,task.id,fileItems);//上报map任务完成
             std::cout<<"map report:"<<id<<"--"<<task.id<<std::endl;
         }else{
-            std::string filepath=processReduceAndWrite(task,id,taskSock);
+            std::string filepath=processReduceAndWrite(task,id);
             FileItem file=makeFileItem(filepath);
             json j=request(taskSock,"reduceReport","127.0.0.1",9099,id,task.id,file);//上报reduce任务完成
             std::cout<<"reduce report:"<<id<<"--"<<task.id<<std::endl;
@@ -153,15 +153,20 @@ public:
         return 0;
     }
 
-    std::string copyFileFromWorker(std::string filepath){
-        std::string content=readFile(filepath);
+    std::string copyFileFromWorker(FileItem file){
+        std::string key=file.addr+":"+std::to_string(file.port);
+        if(fileSocks.find(key)==fileSocks.end()){
+            int fileSock=connectNode(file.addr,file.port);
+            fileSocks[key]=fileSock;
+        }
+        std::string content=getNodeFile(file.filepath,fileSocks[key]);
         return content;
     }
 
     std::vector<MapFile> copyFiles(std::vector<MapFile> files){
         std::vector<MapFile> ret;
         for(auto& it:files){
-            std::string content=copyFileFromWorker(it.file.filepath);
+            std::string content=copyFileFromWorker(it.file);
             writeFile(content,it.file.filepath);
             MapFile mf;
             mf.file.filepath=it.file.filepath;
@@ -193,12 +198,14 @@ private:
     RPCServer rpcServer;
     std::thread rpcLoop;
     int rpcPort;
+    std::unordered_map<std::string,int> fileSocks;
 
     FileItem makeFileItem(std::string filepath){
         FileItem file;
         file.addr=addr;
         file.port=rpcPort;
         file.filepath=filepath;
+        return file;
     }
 
     void registerRpc(){
@@ -223,7 +230,7 @@ private:
     }
 
     void taskLoop(){
-        taskSock=connectCoord("127.0.0.1",9099);
+        taskSock=connectNode("127.0.0.1",9099);
         while(!stop.load()){
             json j=request(taskSock,"assignTask",id);
             Task task=j["result"].get<Task>();
@@ -233,7 +240,7 @@ private:
                     std::this_thread::sleep_for(std::chrono::milliseconds(hbIntervalMs));
                     continue;
                 }
-                std::string filepath=processReduceAndWrite(task,id,taskSock);
+                std::string filepath=processReduceAndWrite(task,id);
                 j=request(taskSock,"reduceReport","127.0.0.1",9099,id,task.id,filepath);//上报reduce任务完成
                 std::cout<<"reduce report:"<<id<<"--"<<task.id<<std::endl;
             }else{ //是map任务
@@ -250,7 +257,7 @@ private:
         }
     }
 
-    int connectCoord(const std::string& ip,const int port){
+    int connectNode(const std::string& ip,const int port){
         int sock=0;
         sockaddr_in serv_addr;
         sock=socket(AF_INET,SOCK_STREAM,0);
@@ -263,6 +270,50 @@ private:
             return -1;
         }
         return sock;
+    }
+
+    //reduce执行与写入
+    std::string processReduceAndWrite(Task& task,int workerId){
+        std::cout<<"reduceId: "<<task.id<<std::endl;
+        for(auto& it:task.files){
+            std::cout<<"filepath: "<<it.filepath<<std::endl;
+        }
+
+        auto& files = task.files;
+        std::vector<KeyValue> keyvals;
+        std::string key, val;
+        for (uint i = 0; i < files.size(); i++) {
+            std::string content=copyFileFromWorker(files[i]);
+            std::stringstream ss(content);
+            while (ss >> key >> val) {
+                keyvals.push_back({ key, val });
+            }
+        }
+
+        std::sort(keyvals.begin(),keyvals.end());
+
+        std::string preKey = keyvals[0].first;
+        std::vector<std::string> vals;
+        std::vector<KeyValue> ans;
+        for (uint i = 0; i < keyvals.size(); i++) {
+            if (preKey != keyvals[i].first) {
+                std::vector<std::string> rs = Reduce(preKey, vals);
+                if (!rs.empty()) {
+                    ans.push_back({ preKey, rs[0] });
+                }
+                vals.clear();
+                preKey = keyvals[i].first;
+                vals.push_back(keyvals[i].second);
+            } else {
+                vals.push_back(keyvals[i].second);
+            }
+        }
+        std::vector<std::string> rs = Reduce(preKey, vals);
+        if (!rs.empty()) {
+            ans.push_back({ preKey, rs[0] });
+        }
+        std::string filepath=writeReduceAnsToFile(task.id,ans);
+        return filepath;
     }
 };
 

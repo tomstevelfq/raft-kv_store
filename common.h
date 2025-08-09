@@ -9,6 +9,7 @@
 #include<cstring>
 #include<csignal>
 #include<filesystem>
+#include<sstream>
 
 using json=nlohmann::json;
 namespace fs=std::filesystem;
@@ -184,49 +185,6 @@ json request(int sock,const std::string& name,Args... args){
     return j;
 }
 
-//reduce执行与写入
-std::string processReduceAndWrite(Task& task,int workerId,int taskSock){
-    std::cout<<"reduceId: "<<task.id<<std::endl;
-    for(auto& it:task.files){
-        std::cout<<"filepath: "<<it.filepath<<std::endl;
-    }
-
-    auto& files = task.files;
-    std::vector<KeyValue> keyvals;
-    std::string key, val;
-    for (uint i = 0; i < files.size(); i++) {
-        std::ifstream ifs(files[i].filepath);
-        while (ifs >> key >> val) {
-            keyvals.push_back({ key, val });
-        }
-    }
-
-    std::sort(keyvals.begin(),keyvals.end());
-
-    std::string preKey = keyvals[0].first;
-    std::vector<std::string> vals;
-    std::vector<KeyValue> ans;
-    for (uint i = 0; i < keyvals.size(); i++) {
-        if (preKey != keyvals[i].first) {
-            std::vector<std::string> rs = Reduce(preKey, vals);
-            if (!rs.empty()) {
-                ans.push_back({ preKey, rs[0] });
-            }
-            vals.clear();
-            preKey = keyvals[i].first;
-            vals.push_back(keyvals[i].second);
-        } else {
-            vals.push_back(keyvals[i].second);
-        }
-    }
-    std::vector<std::string> rs = Reduce(preKey, vals);
-    if (!rs.empty()) {
-        ans.push_back({ preKey, rs[0] });
-    }
-    std::string filepath=writeReduceAnsToFile(task.id,ans);
-    return filepath;
-}
-
 //文件读取函数
 std::string readFile(std::string filename){
     std::ifstream file(filename);
@@ -261,8 +219,4 @@ std::string getNodeFile(std::string filepath,int sock){
     json j=request(sock,"getFile",filepath);
     std::string content=std::move(j["result"].get<std::string>());
     return content;
-}
-
-std::string getFileName(std::string path){
-    return fs::path(path).filename().string();
 }

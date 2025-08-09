@@ -222,8 +222,7 @@ private:
         {
             std::lock_guard<std::mutex> lck(fileMapMtx);
             for(auto& it:*mapFiles){
-                std::string filename=getFileName(it.file.filepath);
-                fileMap[filename].push_back(it);
+                fileMap[it.file.filepath].push_back(it);
             }
         }
 
@@ -251,8 +250,7 @@ private:
         {
             std::lock_guard<std::mutex> lck(fileMapMtx);
             for(auto& it:v){
-                std::string filename=getFileName(it.file.filepath);
-                fileMap[filename].push_back(it);
+                fileMap[it.file.filepath].push_back(it);
             }
         }
         return 0;

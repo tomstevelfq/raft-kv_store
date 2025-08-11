@@ -198,26 +198,14 @@ std::pair<bool, json> request(int sock, const std::string& name, Args&&... args)
 
     // 解析 JSON
     std::string resp(buffer, bytes);
+    std::cout<<"resp:"<<resp<<std::endl;
     try {
         json j = json::parse(resp);
-
-        // 约定：result == 0 表示成功
-        int result_code = 0;
-        if (j.contains("result")) {
-            result_code = j["result"].get<int>();
-        } else if (j.contains("code")) {
-            result_code = j["code"].get<int>(); // 兼容另一种字段名
-        } else {
-            // 未携带结果码，视为协议错误
-            json err = {
-                {"code", -1003},
-                {"message", "missing result/code in response"},
-                {"raw", j}
-            };
-            return {false, err};
+        // 建议：遇到异常时先把原始 resp 打出来排查
+        if (!j.is_object()) {
+            throw std::runtime_error("response is not a JSON object: " + resp);
         }
-
-        bool ok = (result_code == 0);
+        bool ok = true;
         return {ok, j};
     } catch (const std::exception& e) {
         json err = {
@@ -259,8 +247,11 @@ void writeFile(const std::string& content,const std::string& filename){
 }
 
 //获取节点上的远程文件
-std::string getNodeFile(std::string filepath,int sock){
-    json j=request(sock,"getFile",filepath);
-    std::string content=std::move(j["result"].get<std::string>());
-    return content;
+std::pair<bool,std::string> getNodeFile(std::string filepath,int sock){
+    auto [ok,j]=request(sock,"getFile",filepath);
+    if(!ok){
+        return {false,""};
+    }
+    std::string content=j["result"].get<std::string>();
+    return {true,content};
 }

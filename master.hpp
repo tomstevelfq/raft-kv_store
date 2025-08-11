@@ -89,6 +89,7 @@ private:
     std::pair<int,int> registerWorker(std::string addr){
         std::lock_guard<std::mutex> lk(mu);
         int id=nextId++;
+        workers[id]=std::make_shared<WorkerInfo>();
         auto wi=workers[id];
         wi->id=id;
         wi->addr=addr;
@@ -307,8 +308,8 @@ private:
     }
 
 public:
-    explicit Coordinator(int R,int timeoutMs):R(R),timeoutMs(timeoutMs),nextId(1),stop(false),mapCompleteCount(0),
-    isReduce(false),addr("127.0.0.1"){
+    explicit Coordinator(int R,int timeoutMs):addr("127.0.0.1"),R(R),timeoutMs(timeoutMs),nextId(1),stop(false),mapCompleteCount(0),
+    isReduce(false){
         tasks={{MAP,0,{makeFileItem("file1.txt")}},{MAP,1,{makeFileItem("file2.txt")}},{MAP,2,{makeFileItem("file3.txt")}}};//初始化任务列表
         totalMapTasks=tasks.size();
     }
@@ -340,6 +341,7 @@ public:
         file.addr=addr;
         file.port=PORT;
         file.filepath=filepath;
+        return file;
     }
 
     //开启reduce阶段
@@ -526,7 +528,7 @@ public:
                     }
                 }
             }
-            std::string content=std::move(j["result"].get<std::string>());
+            std::string content=j["result"].get<std::string>();
             out.write(content.data(),content.size());
         }
 

@@ -54,9 +54,12 @@ public:
         rpcServer.register_function("copyFiles",this,&Worker::copyFiles);
         rpcServer.register_function("copyFileFromWorker",this,&Worker::copyFileFromWorker);
         rpcLoop=std::thread([this]{this->rpcServer.startRpcLoop(9900);});//开启循环
-        rpcServer.startRpcLoop(9900);
         serverSock=connectNode("127.0.0.1",9099);
-        json j=request(serverSock,"registerWorker","localhost");//向maser注册
+        auto [ok,j]=request(serverSock,"registerWorker","localhost");//向maser注册
+        if(!ok){
+            perror("server can not connected\n");
+            exit(0);
+        }
         std::cout<<"result:"<<j["result"]<<std::endl;
         auto result=j["result"].get<std::pair<int,int>>();
         id=result.first;
@@ -135,19 +138,32 @@ public:
     //重新执行map或reduce任务 
     int recoverTask(Task task){
         if(task.type==MAP){
-            task.files[0].content=getNodeFile(task.files[0].filepath,serverSock);
+            auto [ok,content]=getNodeFile(task.files[0].filepath,serverSock);
+            if(!ok){
+                perror("map file get error\n");
+                exit(0);
+            }
+            task.files[0].content=std::move(content);
             std::vector<std::string> files(R);
             processMapAndWrite(task.id,task.files[0].content,R,files);
             std::vector<FileItem> fileItems(R);
             for(int i=0;i<files.size();i++){
                 fileItems[i]=makeFileItem(files[i]);
             }
-            request(taskSock,"mapReport","127.0.0.1",9099,id,task.id,fileItems);//上报map任务完成
+            auto p=request(taskSock,"mapReport","127.0.0.1",9099,id,task.id,fileItems);//上报map任务完成
+            if(!p.first){
+                perror("server cannot connected\n");
+                exit(0);
+            }
             std::cout<<"map report:"<<id<<"--"<<task.id<<std::endl;
         }else{
             std::string filepath=processReduceAndWrite(task,id);
             FileItem file=makeFileItem(filepath);
-            json j=request(taskSock,"reduceReport","127.0.0.1",9099,id,task.id,file);//上报reduce任务完成
+            auto [ok,j]=request(taskSock,"reduceReport","127.0.0.1",9099,id,task.id,file);//上报reduce任务完成
+            if(!ok){
+                perror("server cannot connected\n");
+                exit(0);
+            }
             std::cout<<"reduce report:"<<id<<"--"<<task.id<<std::endl;
         }
         return 0;
@@ -159,7 +175,25 @@ public:
             int fileSock=connectNode(file.addr,file.port);
             fileSocks[key]=fileSock;
         }
-        std::string content=getNodeFile(file.filepath,fileSocks[key]);
+        auto [ok,content]=getNodeFile(file.filepath,fileSocks[key]);
+        if(!ok){
+            auto [ok,j]=request(taskSock,"getBakFile",file);
+            if(!ok){
+                perror("getBakFile error\n");
+                exit(0);
+            }
+            FileItem filebak=j["result"].get<FileItem>();
+            std::string key=filebak.addr+":"+std::to_string(filebak.port);
+            if(fileSocks.find(key)==fileSocks.end()){
+                int fileSock=connectNode(filebak.addr,filebak.port);
+                fileSocks[key]=fileSock;
+            }
+            auto p=getNodeFile(filebak.filepath,fileSocks[key]);
+            if(!p.first){
+                perror("getBekFile from worker error\n");
+                exit(0);
+            }
+        }
         return content;
     }
 
@@ -219,8 +253,7 @@ private:
         while(!stop.load()){
             {
                 //std::lock_guard<std::mutex> lk(mu);
-                json j=request(serverSock,"heartbeat",id,status,runningTask);
-                bool ok=j["result"];
+                auto[ok,j]=request(serverSock,"heartbeat",id,status,runningTask);
                 if(!ok){
                     std::cout<<"worker#"<<id<<" heartbeat rejected (not registered?)\n";
                 }
@@ -232,7 +265,11 @@ private:
     void taskLoop(){
         taskSock=connectNode("127.0.0.1",9099);
         while(!stop.load()){
-            json j=request(taskSock,"assignTask",id);
+            auto [ok,j]=request(taskSock,"assignTask",id);
+            if(!ok){
+                perror("request assignTask failed\n");
+                exit(0);
+            }
             Task task=j["result"].get<Task>();
             if(task.type==REDUCE){ //是reduce任务
                 if(task.id==-1){
@@ -241,15 +278,28 @@ private:
                     continue;
                 }
                 std::string filepath=processReduceAndWrite(task,id);
-                j=request(taskSock,"reduceReport","127.0.0.1",9099,id,task.id,filepath);//上报reduce任务完成
+                auto [ok,j]=request(taskSock,"reduceReport","127.0.0.1",9099,id,task.id,filepath);//上报reduce任务完成
+                if(!ok){
+                    perror("reduce report error\n");
+                    exit(0);
+                }
                 std::cout<<"reduce report:"<<id<<"--"<<task.id<<std::endl;
             }else{ //是map任务
                 if(task.id!=-1){
                     std::cout<<"solving task "<<task.id<<" "<<task.files[0].filepath<<std::endl;
-                    task.files[0].content=getNodeFile(task.files[0].filepath,serverSock);
+                    auto [ok,content]=getNodeFile(task.files[0].filepath,serverSock);
+                    if(!ok){
+                        perror("get map file error\n");
+                        exit(0);
+                    }
+                    task.files[0].content=content;
                     std::vector<std::string> files(R);
                     processMapAndWrite(task.id,task.files[0].content,R,files);
-                    j=request(taskSock,"mapReport","127.0.0.1",9099,id,task.id,files);//上报map任务完成
+                    auto p=request(taskSock,"mapReport","127.0.0.1",9099,id,task.id,files);//上报map任务完成
+                    if(!p.first){
+                        perror("map report error\n");
+                        exit(0);
+                    }
                     std::cout<<"map report:"<<id<<"--"<<task.id<<std::endl;
                 }
             }

@@ -1,7 +1,7 @@
 # 编译器
 CXX = g++
 # 编译选项
-CXXFLAGS = -std=c++17 -Wall -O2
+CXXFLAGS = -std=c++17 -Wall -g -O2
 
 # 目标文件
 OBJS = server.o worker.o test.o

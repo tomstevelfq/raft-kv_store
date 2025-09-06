@@ -292,3 +292,101 @@ loop:
 
 如果你需要，我可以把上面的流程直接落成一个**最小可运行 C++ 多线程 Demo**（含中间文件命名、模拟 RPC/HTTP 的本地拷贝、失败重试的超时机制）。你更偏好“单文件最小化”还是“多文件模块化”？我按你的偏好给代码。
 
+
+
+
+Raft 算法简介
+Raft 是一种一致性算法（Consensus Algorithm），用于在分布式系统中多个节点之间保持复制日志的一致性。它是 Paxos 的一种更易理解、实现的替代方案。Raft 的主要目标是：
+
+保证在集群中只要多数节点可用，系统就能正常工作；
+
+在节点故障、网络分区等情况下保持数据一致；
+
+提供强一致性（Strong Consistency），即客户端总能看到最新的已提交数据。
+
+Raft 的工作流程大体分为三大部分：
+
+领导人选举（Leader Election）
+
+确保在任何时间集群中有且只有一个 Leader。
+
+Follower 超时未收到心跳会发起选举，成为 Candidate，并请求其他节点投票。
+
+获得多数票的 Candidate 成为 Leader，开始处理客户端请求。
+
+日志复制（Log Replication）
+
+Leader 接收客户端请求，将请求作为日志条目追加到本地日志。
+
+Leader 通过 AppendEntries RPC 将日志复制到所有 Follower。
+
+当日志在多数节点上复制完成，就可以提交（commit）并对外生效。
+
+安全性保证（Safety）
+
+Leader 只能提交自己任期内的日志。
+
+日志匹配原则：如果两个日志条目的索引和任期相同，则它们的前面的日志完全一致。
+
+通过任期号（term）和索引（index）确保日志一致性。
+
+Raft 的核心模块
+在具体实现中，Raft 算法需要以下模块协作：
+
+节点状态管理模块
+
+三种角色：Follower、Candidate、Leader
+
+状态转换逻辑（如选举超时、收到更高 term 的 RPC 等）
+
+定时器管理（选举定时器、心跳定时器）
+
+选举模块（Leader Election）
+
+选举超时触发候选人状态
+
+投票机制（RequestVote RPC）
+
+任期（term）管理与更新
+
+日志复制模块（Log Replication）
+
+接收客户端请求、追加日志
+
+AppendEntries RPC 发送日志条目
+
+日志匹配与回退机制
+
+提交（commit）与应用到状态机
+
+持久化模块（Persistence）
+
+持久化当前任期（currentTerm）、投票信息（votedFor）、日志（log[]）
+
+确保节点重启后仍能保证一致性
+
+安全性模块（Safety & Commit）
+
+日志匹配性检查
+
+保证 Leader 只提交安全的日志条目
+
+提交后将日志应用到状态机（State Machine）
+
+客户端交互模块（Client Interaction）
+
+Leader 接收并处理客户端请求
+
+非 Leader 节点将请求重定向到 Leader
+
+集群通信模块（RPC 通信）
+
+主要包括两种 RPC：
+
+RequestVote RPC（选举）
+
+AppendEntries RPC（心跳 + 日志复制）
+
+网络错误与超时处理
+
+如果你愿意，我可以帮你画一张Raft 算法架构图，把这几个模块和它们的交互关系都清晰标出来，这样比文字更直观。这样做你会更快掌握 Raft 的结构和运行机制。
